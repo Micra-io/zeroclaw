@@ -149,6 +149,14 @@ pub struct Config {
     #[serde(default)]
     pub agent: AgentConfig,
 
+    /// Channel session boundary and identity-link configuration (`[session]`).
+    #[serde(default)]
+    pub session: SessionConfig,
+
+    /// Tool profile presets and overrides (`[tools]`).
+    #[serde(default)]
+    pub tools: ToolsConfig,
+
     /// Skills loading and community repository behavior (`[skills]`).
     #[serde(default)]
     pub skills: SkillsConfig,
@@ -785,6 +793,117 @@ impl Default for AgentConfig {
             loop_detection_no_progress_threshold: default_loop_detection_no_progress_threshold(),
             loop_detection_ping_pong_cycles: default_loop_detection_ping_pong_cycles(),
             loop_detection_failure_streak: default_loop_detection_failure_streak(),
+        }
+    }
+}
+
+/// Session key scope used for direct-message style sender history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionDmScope {
+    /// Share session memory for the same sender across channels.
+    PerPeer,
+    /// Keep sender session memory isolated per channel (legacy default behavior).
+    #[default]
+    PerChannelPeer,
+    /// Keep sender session memory isolated by channel and reply target/account.
+    PerAccountChannelPeer,
+}
+
+/// Session key scope used for conversation history tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionHistoryScope {
+    /// Share history for the same sender across channels.
+    PerPeer,
+    /// Keep sender history isolated per channel.
+    PerChannelPeer,
+    /// Keep sender history isolated per thread when available (legacy default behavior).
+    #[default]
+    PerThreadPeer,
+    /// Keep sender history isolated by channel and reply target/account.
+    PerAccountChannelPeer,
+}
+
+/// Session boundary policy (`[session]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SessionConfig {
+    /// Scope for direct-message memory keys.
+    #[serde(default)]
+    pub dm_scope: SessionDmScope,
+    /// Scope for conversation history keys.
+    #[serde(default)]
+    pub history_scope: SessionHistoryScope,
+    /// Cross-channel identity links.
+    ///
+    /// Key supports either:
+    /// - `<channel>:<sender>` for channel-specific mapping
+    /// - `<sender>` for generic mapping fallback
+    ///
+    /// Value is a canonical identity string used for key generation.
+    #[serde(default)]
+    pub identity_links: HashMap<String, String>,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            dm_scope: SessionDmScope::default(),
+            history_scope: SessionHistoryScope::default(),
+            identity_links: HashMap::new(),
+        }
+    }
+}
+
+/// Built-in tool profile presets (`[tools].profile`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolProfilePreset {
+    /// Include all built-in tools (legacy behavior).
+    #[default]
+    Full,
+    /// Coding-first defaults: shell/files/git/patch/search + memory helpers.
+    Coding,
+    /// Research-first defaults: web/browse/docs/vision + memory helpers.
+    Research,
+    /// Ops-first defaults: cron/schedule/proxy/provider + execution helpers.
+    Ops,
+}
+
+/// Elevated tool profile extension (`[tools.elevated]`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct ElevatedToolsConfig {
+    /// Optional additional preset merged into the active tool set.
+    ///
+    /// This does not bypass autonomy/approval gates; it only extends availability.
+    #[serde(default)]
+    pub profile: Option<ToolProfilePreset>,
+}
+
+/// Tool profile and override configuration (`[tools]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ToolsConfig {
+    /// Base profile preset.
+    #[serde(default)]
+    pub profile: ToolProfilePreset,
+    /// Force-enable specific tool names (wins over preset membership).
+    #[serde(default)]
+    pub enable: Vec<String>,
+    /// Force-disable specific tool names (wins over preset membership).
+    #[serde(default)]
+    pub disable: Vec<String>,
+    /// Optional elevated preset merged into active tool set.
+    #[serde(default)]
+    pub elevated: ElevatedToolsConfig,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            profile: ToolProfilePreset::default(),
+            enable: Vec::new(),
+            disable: Vec::new(),
+            elevated: ElevatedToolsConfig::default(),
         }
     }
 }
@@ -3818,6 +3937,46 @@ impl<T: ChannelConfig> crate::config::traits::ConfigHandle for ConfigWrapper<T> 
 /// Each channel sub-section (e.g. `telegram`, `discord`) is optional;
 /// setting it to `Some(...)` enables that channel.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelCommandPolicyConfig {
+    /// Enable built-in runtime command parsing for this channel.
+    /// When false, runtime commands are blocked by policy.
+    #[serde(default = "default_channel_command_native")]
+    pub native: bool,
+    /// Allowed runtime commands for this channel.
+    ///
+    /// Values are canonical command names (without slash), e.g.
+    /// `new`, `model`, `models`, `approve`, `approve-request`.
+    /// Empty means "allow all native runtime commands".
+    #[serde(default)]
+    pub allowed: Vec<String>,
+    /// Whether config-write-capable runtime commands are allowed.
+    ///
+    /// Affected commands include approvals that persist
+    /// `autonomy.auto_approve` (for example `/approve`, `/unapprove`,
+    /// and `/approve-allow` when approving a tool request).
+    #[serde(default = "default_channel_command_config_writes")]
+    pub config_writes: bool,
+}
+
+fn default_channel_command_native() -> bool {
+    true
+}
+
+fn default_channel_command_config_writes() -> bool {
+    true
+}
+
+impl Default for ChannelCommandPolicyConfig {
+    fn default() -> Self {
+        Self {
+            native: default_channel_command_native(),
+            allowed: Vec::new(),
+            config_writes: default_channel_command_config_writes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ChannelsConfig {
     /// Enable the CLI interactive channel. Default: `true`.
     pub cli: bool,
@@ -3860,6 +4019,15 @@ pub struct ChannelsConfig {
     pub nostr: Option<NostrConfig>,
     /// ClawdTalk voice channel configuration.
     pub clawdtalk: Option<crate::channels::clawdtalk::ClawdTalkConfig>,
+    /// Runtime command policy by channel key (e.g. `telegram`, `discord`).
+    ///
+    /// Example:
+    /// `[channels_config.commands.telegram]`
+    /// `native = true`
+    /// `allowed = ["new", "model", "models", "approve"]`
+    /// `config_writes = false`
+    #[serde(default)]
+    pub commands: HashMap<String, ChannelCommandPolicyConfig>,
     /// Base timeout in seconds for processing a single channel message (LLM + tools).
     /// Runtime uses this as a per-turn budget that scales with tool-loop depth
     /// (up to 4x, capped) so one slow/retried model call does not consume the
@@ -3993,6 +4161,7 @@ impl Default for ChannelsConfig {
             qq: None,
             nostr: None,
             clawdtalk: None,
+            commands: HashMap::new(),
             message_timeout_secs: default_channel_message_timeout_secs(),
         }
     }
@@ -5493,6 +5662,8 @@ impl Default for Config {
             reliability: ReliabilityConfig::default(),
             scheduler: SchedulerConfig::default(),
             agent: AgentConfig::default(),
+            session: SessionConfig::default(),
+            tools: ToolsConfig::default(),
             skills: SkillsConfig::default(),
             model_routes: Vec::new(),
             embedding_routes: Vec::new(),
@@ -6705,6 +6876,61 @@ impl Config {
                 anyhow::bail!(
                     "autonomy.non_cli_excluded_tools contains duplicate entry: {normalized}"
                 );
+            }
+        }
+
+        // Session
+        for (idx, (source, target)) in self.session.identity_links.iter().enumerate() {
+            if source.trim().is_empty() {
+                anyhow::bail!("session.identity_links entry {idx} has an empty source key");
+            }
+            if source.chars().any(char::is_whitespace) {
+                anyhow::bail!(
+                    "session.identity_links entry {idx} source key must not contain whitespace"
+                );
+            }
+            if target.trim().is_empty() {
+                anyhow::bail!("session.identity_links entry {idx} has an empty canonical identity");
+            }
+            if target.chars().any(char::is_whitespace) {
+                anyhow::bail!(
+                    "session.identity_links entry {idx} canonical identity must not contain whitespace"
+                );
+            }
+        }
+
+        // Tools
+        let mut seen_tools_enable = std::collections::HashSet::new();
+        for (idx, tool_name) in self.tools.enable.iter().enumerate() {
+            let normalized = tool_name.trim();
+            if normalized.is_empty() {
+                anyhow::bail!("tools.enable[{idx}] must not be empty");
+            }
+            if !normalized
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+            {
+                anyhow::bail!("tools.enable[{idx}] contains invalid characters: {normalized}");
+            }
+            if !seen_tools_enable.insert(normalized.to_ascii_lowercase()) {
+                anyhow::bail!("tools.enable contains duplicate entry: {normalized}");
+            }
+        }
+
+        let mut seen_tools_disable = std::collections::HashSet::new();
+        for (idx, tool_name) in self.tools.disable.iter().enumerate() {
+            let normalized = tool_name.trim();
+            if normalized.is_empty() {
+                anyhow::bail!("tools.disable[{idx}] must not be empty");
+            }
+            if !normalized
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+            {
+                anyhow::bail!("tools.disable[{idx}] contains invalid characters: {normalized}");
+            }
+            if !seen_tools_disable.insert(normalized.to_ascii_lowercase()) {
+                anyhow::bail!("tools.disable contains duplicate entry: {normalized}");
             }
         }
 
@@ -8263,6 +8489,8 @@ mod tests {
 
         assert!(properties.contains_key("default_provider"));
         assert!(properties.contains_key("skills"));
+        assert!(properties.contains_key("session"));
+        assert!(properties.contains_key("tools"));
         assert!(properties.contains_key("gateway"));
         assert!(properties.contains_key("channels_config"));
         assert!(!properties.contains_key("workspace_dir"));
@@ -8365,6 +8593,42 @@ allowed_roots = []
         assert!(err
             .to_string()
             .contains("autonomy.non_cli_excluded_tools contains duplicate entry"));
+    }
+
+    #[test]
+    async fn config_validate_rejects_invalid_tools_enable_entry() {
+        let mut cfg = Config::default();
+        cfg.tools.enable = vec!["bad name".into()];
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("tools.enable[0]"));
+    }
+
+    #[test]
+    async fn config_validate_rejects_invalid_tools_disable_entry() {
+        let mut cfg = Config::default();
+        cfg.tools.disable = vec!["bad name".into()];
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("tools.disable[0]"));
+    }
+
+    #[test]
+    async fn config_validate_rejects_duplicate_tools_enable_entries() {
+        let mut cfg = Config::default();
+        cfg.tools.enable = vec!["shell".into(), "Shell".into()];
+        let err = cfg.validate().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("tools.enable contains duplicate entry"));
+    }
+
+    #[test]
+    async fn config_validate_rejects_duplicate_tools_disable_entries() {
+        let mut cfg = Config::default();
+        cfg.tools.disable = vec!["browser_open".into(), "browser_open".into()];
+        let err = cfg.validate().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("tools.disable contains duplicate entry"));
     }
 
     #[test]
@@ -8486,6 +8750,32 @@ default_temperature = 0.7
         assert!(c.cli);
         assert!(c.telegram.is_none());
         assert!(c.discord.is_none());
+        assert!(c.commands.is_empty());
+    }
+
+    #[test]
+    async fn channels_command_policy_from_toml() {
+        let raw = r#"
+default_temperature = 0.7
+
+[channels_config]
+cli = true
+
+[channels_config.commands.telegram]
+native = true
+allowed = ["new", "approvals"]
+config_writes = false
+"#;
+
+        let parsed: Config = toml::from_str(raw).unwrap();
+        let policy = parsed
+            .channels_config
+            .commands
+            .get("telegram")
+            .expect("telegram policy should parse");
+        assert!(policy.native);
+        assert_eq!(policy.allowed, vec!["new", "approvals"]);
+        assert!(!policy.config_writes);
     }
 
     // ── Serde round-trip ─────────────────────────────────────
@@ -8538,6 +8828,8 @@ default_temperature = 0.7
             scheduler: SchedulerConfig::default(),
             coordination: CoordinationConfig::default(),
             skills: SkillsConfig::default(),
+            session: SessionConfig::default(),
+            tools: ToolsConfig::default(),
             plugins: PluginsConfig::default(),
             model_routes: Vec::new(),
             embedding_routes: Vec::new(),
@@ -8582,6 +8874,7 @@ default_temperature = 0.7
                 qq: None,
                 nostr: None,
                 clawdtalk: None,
+                commands: HashMap::new(),
                 message_timeout_secs: 300,
             },
             memory: MemoryConfig::default(),
@@ -8890,6 +9183,72 @@ reasoning_level = "high"
     }
 
     #[test]
+    async fn session_config_defaults() {
+        let cfg = SessionConfig::default();
+        assert_eq!(cfg.dm_scope, SessionDmScope::PerChannelPeer);
+        assert_eq!(cfg.history_scope, SessionHistoryScope::PerThreadPeer);
+        assert!(cfg.identity_links.is_empty());
+    }
+
+    #[test]
+    async fn tools_config_defaults() {
+        let cfg = ToolsConfig::default();
+        assert_eq!(cfg.profile, ToolProfilePreset::Full);
+        assert!(cfg.enable.is_empty());
+        assert!(cfg.disable.is_empty());
+        assert!(cfg.elevated.profile.is_none());
+    }
+
+    #[test]
+    async fn tools_config_from_toml() {
+        let raw = r#"
+default_temperature = 0.7
+
+[tools]
+profile = "coding"
+enable = ["web_fetch", "browser_open"]
+disable = ["shell"]
+
+[tools.elevated]
+profile = "ops"
+"#;
+        let parsed: Config = toml::from_str(raw).unwrap();
+        assert_eq!(parsed.tools.profile, ToolProfilePreset::Coding);
+        assert_eq!(parsed.tools.enable, vec!["web_fetch", "browser_open"]);
+        assert_eq!(parsed.tools.disable, vec!["shell"]);
+        assert_eq!(parsed.tools.elevated.profile, Some(ToolProfilePreset::Ops));
+    }
+
+    #[test]
+    async fn session_config_from_toml() {
+        let raw = r#"
+default_temperature = 0.7
+
+[session]
+dm_scope = "per-peer"
+history_scope = "per-thread-peer"
+
+[session.identity_links]
+"telegram:12345" = "user-alice"
+"U999" = "user-bob"
+"#;
+        let parsed: Config = toml::from_str(raw).unwrap();
+        assert_eq!(parsed.session.dm_scope, SessionDmScope::PerPeer);
+        assert_eq!(
+            parsed.session.history_scope,
+            SessionHistoryScope::PerThreadPeer
+        );
+        assert_eq!(
+            parsed.session.identity_links.get("telegram:12345"),
+            Some(&"user-alice".to_string())
+        );
+        assert_eq!(
+            parsed.session.identity_links.get("U999"),
+            Some(&"user-bob".to_string())
+        );
+    }
+
+    #[test]
     async fn agent_config_deserializes() {
         let raw = r#"
 default_temperature = 0.7
@@ -8948,6 +9307,8 @@ tool_dispatcher = "xml"
             scheduler: SchedulerConfig::default(),
             coordination: CoordinationConfig::default(),
             skills: SkillsConfig::default(),
+            session: SessionConfig::default(),
+            tools: ToolsConfig::default(),
             plugins: PluginsConfig::default(),
             model_routes: Vec::new(),
             embedding_routes: Vec::new(),
@@ -9508,6 +9869,7 @@ allowed_users = ["@ops:matrix.org"]
             qq: None,
             nostr: None,
             clawdtalk: None,
+            commands: HashMap::new(),
             message_timeout_secs: 300,
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
@@ -9786,6 +10148,7 @@ channel_id = "C123"
             qq: None,
             nostr: None,
             clawdtalk: None,
+            commands: HashMap::new(),
             message_timeout_secs: 300,
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();

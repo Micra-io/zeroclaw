@@ -134,12 +134,12 @@ pub use web_fetch::WebFetchTool;
 pub use web_search_config::WebSearchConfigTool;
 pub use web_search_tool::WebSearchTool;
 
-use crate::config::{Config, DelegateAgentConfig};
+use crate::config::{Config, DelegateAgentConfig, ToolProfilePreset, ToolsConfig};
 use crate::memory::Memory;
 use crate::runtime::{NativeRuntime, RuntimeAdapter};
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -174,6 +174,224 @@ impl Tool for ArcDelegatingTool {
 
 fn boxed_registry_from_arcs(tools: Vec<Arc<dyn Tool>>) -> Vec<Box<dyn Tool>> {
     tools.into_iter().map(ArcDelegatingTool::boxed).collect()
+}
+
+fn normalize_tool_name(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn is_known_profile_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "shell"
+            | "process"
+            | "git_operations"
+            | "file_read"
+            | "file_write"
+            | "file_edit"
+            | "apply_patch"
+            | "glob_search"
+            | "content_search"
+            | "memory_store"
+            | "memory_recall"
+            | "memory_forget"
+            | "task_plan"
+            | "model_routing_config"
+            | "proxy_config"
+            | "browser_open"
+            | "browser"
+            | "http_request"
+            | "web_fetch"
+            | "web_search_tool"
+            | "pdf_read"
+            | "docx_read"
+            | "screenshot"
+            | "image_info"
+            | "schedule"
+            | "pushover"
+            | "cron_add"
+            | "cron_list"
+            | "cron_remove"
+            | "cron_update"
+            | "cron_run"
+            | "cron_runs"
+            | "composio"
+            | "delegate"
+            | "delegate_coordination_status"
+            | "subagent_spawn"
+            | "subagent_list"
+            | "subagent_manage"
+            | "agents_list"
+            | "agents_send"
+            | "agents_inbox"
+            | "state_get"
+            | "state_set"
+            | "wasm_module"
+    )
+}
+
+fn profile_includes_tool(profile: ToolProfilePreset, tool_name: &str) -> bool {
+    match profile {
+        ToolProfilePreset::Full => true,
+        ToolProfilePreset::Coding => matches!(
+            tool_name,
+            "shell"
+                | "process"
+                | "git_operations"
+                | "file_read"
+                | "file_write"
+                | "file_edit"
+                | "apply_patch"
+                | "glob_search"
+                | "content_search"
+                | "memory_store"
+                | "memory_recall"
+                | "memory_forget"
+                | "task_plan"
+                | "model_routing_config"
+                | "proxy_config"
+                | "subagent_spawn"
+                | "subagent_list"
+                | "subagent_manage"
+        ),
+        ToolProfilePreset::Research => matches!(
+            tool_name,
+            "browser_open"
+                | "browser"
+                | "http_request"
+                | "web_fetch"
+                | "web_search_tool"
+                | "pdf_read"
+                | "docx_read"
+                | "screenshot"
+                | "image_info"
+                | "file_read"
+                | "content_search"
+                | "memory_store"
+                | "memory_recall"
+                | "memory_forget"
+                | "task_plan"
+        ),
+        ToolProfilePreset::Ops => matches!(
+            tool_name,
+            "cron_add"
+                | "cron_list"
+                | "cron_remove"
+                | "cron_update"
+                | "cron_run"
+                | "cron_runs"
+                | "schedule"
+                | "pushover"
+                | "proxy_config"
+                | "model_routing_config"
+                | "shell"
+                | "process"
+                | "git_operations"
+                | "http_request"
+                | "web_fetch"
+                | "memory_store"
+                | "memory_recall"
+                | "task_plan"
+                | "agents_list"
+                | "agents_send"
+                | "agents_inbox"
+                | "state_get"
+                | "state_set"
+        ),
+    }
+}
+
+fn normalized_tool_override_set(entries: &[String]) -> BTreeSet<String> {
+    entries
+        .iter()
+        .map(|value| normalize_tool_name(value))
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn resolve_active_tool_names_from_profile<I, S>(
+    available_names: I,
+    tools_config: &ToolsConfig,
+) -> BTreeSet<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let enabled = normalized_tool_override_set(&tools_config.enable);
+    let disabled = normalized_tool_override_set(&tools_config.disable);
+    let elevated_profile = tools_config.elevated.profile;
+
+    let mut resolved = BTreeSet::new();
+    for raw_name in available_names {
+        let normalized = normalize_tool_name(raw_name.as_ref());
+        if normalized.is_empty() {
+            continue;
+        }
+
+        let preset_allowed = profile_includes_tool(tools_config.profile, &normalized)
+            || elevated_profile
+                .map(|profile| profile_includes_tool(profile, &normalized))
+                .unwrap_or(false);
+        let default_allowed = if is_known_profile_tool(&normalized) {
+            preset_allowed
+        } else {
+            // Keep unknown/dynamic tools (MCP/WASM/plugins) enabled by default
+            // for backward compatibility unless explicitly disabled.
+            true
+        };
+
+        let included = if disabled.contains(&normalized) {
+            false
+        } else if enabled.contains(&normalized) {
+            true
+        } else {
+            default_allowed
+        };
+
+        if included {
+            resolved.insert(normalized);
+        }
+    }
+    resolved
+}
+
+fn apply_tool_profile_filter(
+    registry: Vec<Box<dyn Tool>>,
+    tools_config: &ToolsConfig,
+) -> Vec<Box<dyn Tool>> {
+    if matches!(tools_config.profile, ToolProfilePreset::Full)
+        && tools_config.enable.is_empty()
+        && tools_config.disable.is_empty()
+        && tools_config.elevated.profile.is_none()
+    {
+        return registry;
+    }
+
+    let available_names = registry.iter().map(|tool| tool.name());
+    let allowed = resolve_active_tool_names_from_profile(available_names, tools_config);
+
+    let mut filtered: Vec<Box<dyn Tool>> = Vec::with_capacity(registry.len());
+    let mut removed: Vec<String> = Vec::new();
+    for tool in registry {
+        let normalized = normalize_tool_name(tool.name());
+        if allowed.contains(&normalized) {
+            filtered.push(tool);
+        } else {
+            removed.push(normalized);
+        }
+    }
+    if !removed.is_empty() {
+        removed.sort();
+        removed.dedup();
+        tracing::info!(
+            profile = ?tools_config.profile,
+            elevated_profile = ?tools_config.elevated.profile,
+            removed_tools = ?removed,
+            "tools: applied profile filter to runtime registry"
+        );
+    }
+
+    filtered
 }
 
 /// Create the default tool registry
@@ -573,13 +791,23 @@ pub fn all_tools_with_runtime(
         }
     }
 
-    boxed_registry_from_arcs(tool_arcs)
+    // Load WASM plugin tools from the skills directory.
+    // Each installed skill package may ship one or more WASM tools under
+    // `<skill-dir>/tools/<tool-name>/{tool.wasm, manifest.json}`.
+    // Failures are logged and skipped — a broken plugin must not block startup.
+    let skills_dir = workspace_dir.join("skills");
+    let mut boxed = boxed_registry_from_arcs(tool_arcs);
+    let wasm_tools = wasm_tool::load_wasm_tools_from_skills(&skills_dir);
+    boxed.extend(wasm_tools);
+    apply_tool_profile_filter(boxed, &root_config.tools)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BrowserConfig, Config, MemoryConfig, WasmRuntimeConfig};
+    use crate::config::{
+        BrowserConfig, Config, MemoryConfig, ToolProfilePreset, WasmRuntimeConfig,
+    };
     use crate::runtime::WasmRuntime;
     use tempfile::TempDir;
 
@@ -623,6 +851,52 @@ mod tests {
         assert!(!names.contains(&"apply_patch"));
         assert!(!names.contains(&"glob_search"));
         assert!(!names.contains(&"content_search"));
+    }
+
+    #[test]
+    fn resolve_active_tool_names_coding_profile_filters_known_tools() {
+        let mut cfg = Config::default();
+        cfg.tools.profile = ToolProfilePreset::Coding;
+
+        let resolved = resolve_active_tool_names_from_profile(
+            ["shell", "file_read", "web_search_tool", "custom_mcp_tool"],
+            &cfg.tools,
+        );
+        assert!(resolved.contains("shell"));
+        assert!(resolved.contains("file_read"));
+        assert!(!resolved.contains("web_search_tool"));
+        assert!(resolved.contains("custom_mcp_tool"));
+    }
+
+    #[test]
+    fn resolve_active_tool_names_overrides_take_precedence() {
+        let mut cfg = Config::default();
+        cfg.tools.profile = ToolProfilePreset::Research;
+        cfg.tools.enable = vec!["shell".to_string(), "web_search_tool".to_string()];
+        cfg.tools.disable = vec!["web_search_tool".to_string()];
+
+        let resolved = resolve_active_tool_names_from_profile(
+            ["shell", "web_search_tool", "browser"],
+            &cfg.tools,
+        );
+        assert!(resolved.contains("shell"));
+        assert!(!resolved.contains("web_search_tool"));
+        assert!(resolved.contains("browser"));
+    }
+
+    #[test]
+    fn resolve_active_tool_names_honors_elevated_profile_union() {
+        let mut cfg = Config::default();
+        cfg.tools.profile = ToolProfilePreset::Coding;
+        cfg.tools.elevated.profile = Some(ToolProfilePreset::Research);
+
+        let resolved = resolve_active_tool_names_from_profile(
+            ["shell", "web_search_tool", "cron_add"],
+            &cfg.tools,
+        );
+        assert!(resolved.contains("shell"));
+        assert!(resolved.contains("web_search_tool"));
+        assert!(!resolved.contains("cron_add"));
     }
 
     #[test]
@@ -748,6 +1022,130 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"docx_read"));
         assert!(names.contains(&"pdf_read"));
+    }
+
+    #[test]
+    fn all_tools_applies_profile_filter() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(crate::memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig {
+            enabled: true,
+            allowed_domains: vec!["example.com".into()],
+            session_name: None,
+            ..BrowserConfig::default()
+        };
+        let http = crate::config::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        cfg.web_search.enabled = true;
+        cfg.tools.profile = ToolProfilePreset::Research;
+
+        let tools = all_tools(
+            Arc::new(cfg.clone()),
+            &security,
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            &crate::config::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+        );
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(!names.contains(&"shell"));
+        assert!(names.contains(&"browser"));
+        assert!(names.contains(&"web_search_tool"));
+    }
+
+    #[test]
+    fn all_tools_profile_disable_overrides_enable_in_registry() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(crate::memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig {
+            enabled: true,
+            allowed_domains: vec!["example.com".into()],
+            session_name: None,
+            ..BrowserConfig::default()
+        };
+        let http = crate::config::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        cfg.web_search.enabled = true;
+        cfg.tools.profile = ToolProfilePreset::Research;
+        cfg.tools.enable = vec!["shell".to_string(), "web_search_tool".to_string()];
+        cfg.tools.disable = vec!["web_search_tool".to_string(), "browser".to_string()];
+
+        let tools = all_tools(
+            Arc::new(cfg.clone()),
+            &security,
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            &crate::config::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+        );
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"shell"));
+        assert!(!names.contains(&"web_search_tool"));
+        assert!(!names.contains(&"browser"));
+    }
+
+    #[test]
+    fn all_tools_profile_elevated_union_adds_ops_tools() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(crate::memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig::default();
+        let http = crate::config::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        cfg.tools.profile = ToolProfilePreset::Coding;
+        cfg.tools.elevated.profile = Some(ToolProfilePreset::Ops);
+
+        let tools = all_tools(
+            Arc::new(cfg.clone()),
+            &security,
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            &crate::config::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+        );
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"shell"));
+        assert!(names.contains(&"cron_add"));
+        assert!(names.contains(&"schedule"));
+        assert!(!names.contains(&"browser_open"));
     }
 
     #[test]

@@ -106,6 +106,80 @@ Notes:
 - `parallel_tools` applies to the `Agent::turn()` API surface. It does not gate the runtime loop used by CLI, gateway, or channel handlers.
 - **Loop detection** intervenes before `max_tool_iterations` is exhausted. On first detection the agent receives a self-correction prompt; if the loop persists the agent is stopped early. Detection is result-aware: repeated calls with *different* outputs (genuine progress) do not trigger. Set any threshold to `0` to disable that detector.
 
+## `[session]`
+
+| Key | Default | Purpose |
+|---|---|---|
+| `dm_scope` | `per-channel-peer` | Scope for auto-saved conversation memory keys |
+| `history_scope` | `per-thread-peer` | Scope for in-memory conversation history keying |
+| `identity_links` | `{}` | Canonical cross-channel identity mapping table |
+
+`history_scope` supports:
+
+- `per-peer`: one shared history per canonical sender across all channels.
+- `per-channel-peer`: isolate history by channel + sender.
+- `per-thread-peer`: isolate by channel + thread + sender when thread ID is present (fallback to channel + sender when no thread ID).
+- `per-account-channel-peer`: isolate by channel + reply target/account + sender.
+
+`dm_scope` supports:
+
+- `per-peer`: one shared memory key namespace per canonical sender.
+- `per-channel-peer`: isolate by channel + sender (default).
+- `per-account-channel-peer`: isolate by channel + reply target/account + sender.
+
+`identity_links` lookup order:
+
+1. `<channel>:<sender>` (channel-scoped mapping, highest priority)
+2. `<sender>` (global fallback mapping)
+3. raw sender value (if no mapping found)
+
+Example:
+
+```toml
+[session]
+dm_scope = "per-peer"
+history_scope = "per-account-channel-peer"
+
+[session.identity_links]
+"telegram:12345" = "user-alice"
+"U999" = "user-bob"
+```
+
+## `[tools]`
+
+| Key | Default | Purpose |
+|---|---|---|
+| `profile` | `full` | Base built-in tool preset (`full`, `coding`, `research`, `ops`) |
+| `enable` | `[]` | Force-enable tool names (wins over preset) |
+| `disable` | `[]` | Force-disable tool names (wins over preset) |
+| `elevated.profile` | unset | Optional extra preset merged into the active set |
+
+Preset behavior:
+
+- `full`: legacy behavior (all built-in tools enabled).
+- `coding`: shell/files/git/patch/search + memory/task helpers.
+- `research`: web/browser/docs/vision + memory/task helpers.
+- `ops`: cron/schedule/proxy/provider + execution/IPC helpers.
+
+Rules:
+
+- `disable` has highest priority (tool is removed even if included by preset or `enable`).
+- `enable` can add tools back regardless of preset.
+- Unknown dynamic tools (for example MCP or skill WASM tools) remain enabled by default unless explicitly listed in `disable`.
+- `elevated.profile` only extends availability; it does not bypass autonomy/approval gating.
+
+Example:
+
+```toml
+[tools]
+profile = "coding"
+enable = ["web_fetch", "browser_open"]
+disable = ["shell"]
+
+[tools.elevated]
+profile = "research"
+```
+
 ## `[security.otp]`
 
 | Key | Default | Purpose |
@@ -992,6 +1066,7 @@ Top-level channel options are configured under `channels_config`.
 | Key | Default | Purpose |
 |---|---|---|
 | `message_timeout_secs` | `300` | Base timeout in seconds for channel message processing; runtime scales this with tool-loop depth (up to 4x) |
+| `commands` | `{}` | Optional per-channel runtime command policy map (`[channels_config.commands.<channel>]`) |
 
 Examples:
 
@@ -1002,6 +1077,29 @@ Examples:
 - `[channels_config.nextcloud_talk]`
 - `[channels_config.email]`
 - `[channels_config.nostr]`
+
+Runtime command policy keys (`[channels_config.commands.<channel>]`):
+
+| Key | Default | Purpose |
+|---|---|---|
+| `native` | `true` | Enable native runtime command parsing on this channel |
+| `allowed` | `[]` | Allowed command names (empty = allow all native commands) |
+| `config_writes` | `true` | Allow config-write-capable commands (`approve`, `unapprove`, `approve-allow`) |
+
+Allowed command names use canonical tokens without leading slash:
+
+- `new`
+- `model`
+- `models`
+- `approve-all-once`
+- `approve-request`
+- `approve-confirm`
+- `approve-allow`
+- `approve-deny`
+- `approve-pending`
+- `approve`
+- `unapprove`
+- `approvals`
 
 Notes:
 
@@ -1020,6 +1118,15 @@ Notes:
 - Legacy `mention_only` flags (Telegram/Discord/Mattermost/Lark) remain supported as fallback only.
   If `group_reply.mode` is set, it takes precedence over legacy `mention_only`.
 - While `zeroclaw channel start` is running, updates to `default_provider`, `default_model`, `default_temperature`, `api_key`, `api_url`, and `reliability.*` are hot-applied from `config.toml` on the next inbound message.
+
+Example command policy:
+
+```toml
+[channels_config.commands.telegram]
+native = true
+allowed = ["new", "model", "models", "approvals"]
+config_writes = false
+```
 
 ### `[channels_config.nostr]`
 
