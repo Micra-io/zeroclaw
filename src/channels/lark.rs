@@ -1,3 +1,4 @@
+use super::ack_reaction::{select_ack_reaction, AckReactionContext, AckReactionContextChatType};
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;
 use base64::Engine;
@@ -369,6 +370,7 @@ pub struct LarkChannel {
     tenant_token: Arc<RwLock<Option<CachedTenantToken>>>,
     /// Dedup set: WS message_ids seen in last ~30 min to prevent double-dispatch
     ws_seen_ids: Arc<RwLock<HashMap<String, Instant>>>,
+    ack_reaction: Option<crate::config::AckReactionConfig>,
 }
 
 impl LarkChannel {
@@ -413,7 +415,17 @@ impl LarkChannel {
             receive_mode: crate::config::schema::LarkReceiveMode::default(),
             tenant_token: Arc::new(RwLock::new(None)),
             ws_seen_ids: Arc::new(RwLock::new(HashMap::new())),
+            ack_reaction: None,
         }
+    }
+
+    /// Configure ACK reaction policy.
+    pub fn with_ack_reaction(
+        mut self,
+        ack_reaction: Option<crate::config::AckReactionConfig>,
+    ) -> Self {
+        self.ack_reaction = ack_reaction;
+        self
     }
 
     /// Build from `LarkConfig` using legacy compatibility:
@@ -945,15 +957,29 @@ impl LarkChannel {
                         continue;
                     }
 
-                    let ack_emoji =
-                        random_lark_ack_reaction(Some(&event_payload), &text).to_string();
-                    let reaction_channel = self.clone();
-                    let reaction_message_id = lark_msg.message_id.clone();
-                    tokio::spawn(async move {
-                        reaction_channel
-                            .try_add_ack_reaction(&reaction_message_id, &ack_emoji)
-                            .await;
-                    });
+                    let locale = detect_lark_ack_locale(Some(&event_payload), &text);
+                    let ack_defaults = lark_ack_pool(locale);
+                    let reaction_ctx = AckReactionContext {
+                        text: &text,
+                        sender_id: Some(sender_open_id),
+                        chat_type: if lark_msg.chat_type == "group" {
+                            AckReactionContextChatType::Group
+                        } else {
+                            AckReactionContextChatType::Direct
+                        },
+                        locale_hint: Some(lark_locale_tag(locale)),
+                    };
+                    if let Some(ack_emoji) =
+                        select_ack_reaction(self.ack_reaction.as_ref(), ack_defaults, &reaction_ctx)
+                    {
+                        let reaction_channel = self.clone();
+                        let reaction_message_id = lark_msg.message_id.clone();
+                        tokio::spawn(async move {
+                            reaction_channel
+                                .try_add_ack_reaction(&reaction_message_id, &ack_emoji)
+                                .await;
+                        });
+                    }
 
                     let channel_msg = ChannelMessage {
                         id: Uuid::new_v4().to_string(),
@@ -1500,15 +1526,42 @@ impl LarkChannel {
                     .and_then(|m| m.as_str())
                 {
                     let ack_text = messages.first().map_or("", |msg| msg.content.as_str());
-                    let ack_emoji =
-                        random_lark_ack_reaction(payload.get("event"), ack_text).to_string();
-                    let reaction_channel = Arc::clone(&state.channel);
-                    let reaction_message_id = message_id.to_string();
-                    tokio::spawn(async move {
-                        reaction_channel
-                            .try_add_ack_reaction(&reaction_message_id, &ack_emoji)
-                            .await;
-                    });
+                    let locale = detect_lark_ack_locale(payload.get("event"), ack_text);
+                    let sender_id = payload
+                        .pointer("/event/sender/sender_id/open_id")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
+                    let chat_type = payload
+                        .pointer("/event/message/chat_type")
+                        .and_then(|value| value.as_str())
+                        .map(|kind| {
+                            if kind == "group" {
+                                AckReactionContextChatType::Group
+                            } else {
+                                AckReactionContextChatType::Direct
+                            }
+                        })
+                        .unwrap_or(AckReactionContextChatType::Direct);
+                    let ack_defaults = lark_ack_pool(locale);
+                    let reaction_ctx = AckReactionContext {
+                        text: ack_text,
+                        sender_id: sender_id.as_deref(),
+                        chat_type,
+                        locale_hint: Some(lark_locale_tag(locale)),
+                    };
+                    if let Some(ack_emoji) = select_ack_reaction(
+                        state.channel.ack_reaction.as_ref(),
+                        ack_defaults,
+                        &reaction_ctx,
+                    ) {
+                        let reaction_channel = Arc::clone(&state.channel);
+                        let reaction_message_id = message_id.to_string();
+                        tokio::spawn(async move {
+                            reaction_channel
+                                .try_add_ack_reaction(&reaction_message_id, &ack_emoji)
+                                .await;
+                        });
+                    }
                 }
             }
 
@@ -1574,6 +1627,15 @@ fn lark_ack_pool(locale: LarkAckLocale) -> &'static [&'static str] {
         LarkAckLocale::ZhTw => LARK_ACK_REACTIONS_ZH_TW,
         LarkAckLocale::En => LARK_ACK_REACTIONS_EN,
         LarkAckLocale::Ja => LARK_ACK_REACTIONS_JA,
+    }
+}
+
+fn lark_locale_tag(locale: LarkAckLocale) -> &'static str {
+    match locale {
+        LarkAckLocale::ZhCn => "zh_cn",
+        LarkAckLocale::ZhTw => "zh_tw",
+        LarkAckLocale::En => "en",
+        LarkAckLocale::Ja => "ja",
     }
 }
 

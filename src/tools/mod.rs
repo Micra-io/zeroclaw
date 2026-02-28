@@ -19,6 +19,7 @@ pub mod agents_ipc;
 pub mod apply_patch;
 pub mod browser;
 pub mod browser_open;
+pub mod channel_ack_config;
 pub mod cli_discovery;
 pub mod composio;
 pub mod content_search;
@@ -79,6 +80,7 @@ pub mod web_search_tool;
 pub use apply_patch::ApplyPatchTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
 pub use browser_open::BrowserOpenTool;
+pub use channel_ack_config::ChannelAckConfigTool;
 pub use composio::ComposioTool;
 pub use content_search::ContentSearchTool;
 pub use cron_add::CronAddTool;
@@ -287,6 +289,7 @@ pub fn all_tools_with_runtime(
             config.clone(),
             security.clone(),
         )),
+        Arc::new(ChannelAckConfigTool::new(config.clone(), security.clone())),
         Arc::new(ProxyConfigTool::new(config.clone(), security.clone())),
         Arc::new(WebAccessConfigTool::new(config.clone(), security.clone())),
         Arc::new(WebSearchConfigTool::new(config.clone(), security.clone())),
