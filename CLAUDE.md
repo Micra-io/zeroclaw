@@ -269,6 +269,26 @@ All contributors (human or agent) must follow the same collaboration flow:
 - Do not start triage/review/implementation/merge work before assignee assignment is confirmed.
 - Queue safety rule: assign only the currently active target; do not pre-assign future queued targets.
 
+### 6.1C Fork Sync Workflow (Required)
+
+This repository is maintained as a personal fork of `zeroclaw-labs/zeroclaw`. PRs are not submitted upstream; instead, upstream changes are periodically pulled in and reconciled with local feature branches.
+
+Remotes:
+- `origin` — personal fork (`alexandme/zeroclaw`)
+- `upstream` — original repo (`zeroclaw-labs/zeroclaw`)
+
+Sync procedure:
+1. Fetch upstream: `git fetch upstream`
+2. Update local main: `git checkout main && git merge upstream/main && git push origin main`
+3. Rebase feature branches onto updated main: `git checkout <branch> && git rebase main`
+4. Force-push rebased feature branches to origin: `git push origin <branch> --force-with-lease`
+
+Rules:
+- Never push directly to upstream.
+- Never submit PRs to `zeroclaw-labs/zeroclaw` — PRs target the fork's own `main`.
+- Resolve rebase conflicts locally before pushing.
+- After syncing, verify feature branches still build and pass tests before pushing.
+
 ### 6.2 Worktree Workflow (Required for All Task Streams)
 
 Use Git worktrees to isolate every active task stream safely and predictably:
