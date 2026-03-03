@@ -5068,6 +5068,7 @@ fn collect_configured_channels(
                                 wa.pair_phone.clone(),
                                 wa.pair_code.clone(),
                                 wa.allowed_numbers.clone(),
+                                wa.allowed_groups.clone(),
                             )
                             .with_transcription(config.transcription.clone()),
                         ),
