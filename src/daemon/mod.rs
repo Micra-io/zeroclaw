@@ -692,6 +692,7 @@ mod tests {
             pair_phone: None,
             pair_code: None,
             allowed_numbers: vec!["*".into()],
+            allowed_groups: vec![],
         });
 
         let target = heartbeat_delivery_target(&config).unwrap();
@@ -715,6 +716,7 @@ mod tests {
             pair_phone: None,
             pair_code: None,
             allowed_numbers: vec!["*".into()],
+            allowed_groups: vec![],
         });
 
         let err = heartbeat_delivery_target(&config).unwrap_err();

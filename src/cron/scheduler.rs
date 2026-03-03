@@ -1278,6 +1278,7 @@ mod tests {
             pair_phone: None,
             pair_code: None,
             allowed_numbers: vec!["*".into()],
+            allowed_groups: vec![],
         });
 
         let mut job = test_job("echo ok");
