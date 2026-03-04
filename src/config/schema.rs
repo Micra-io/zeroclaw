@@ -5267,6 +5267,17 @@ pub struct WhatsAppConfig {
     /// Rollback: remove key or set to `[]` to restore allow-all behavior.
     #[serde(default)]
     pub allowed_groups: Vec<String>,
+    /// When true, only respond to messages that mention the bot's name in groups.
+    /// Direct messages are always processed.
+    #[serde(default)]
+    pub mention_only: bool,
+    /// Bot name used for text-based mention detection in groups (e.g. "claw").
+    /// Case-insensitive. Only used when mention_only = true.
+    #[serde(default)]
+    pub mention_name: Option<String>,
+    /// Group-chat trigger controls.
+    #[serde(default)]
+    pub group_reply: Option<GroupReplyConfig>,
 }
 
 impl ChannelConfig for WhatsAppConfig {
@@ -5517,6 +5528,20 @@ impl WhatsAppConfig {
     /// Runtime currently prefers Cloud mode in this case for backward compatibility.
     pub fn is_ambiguous_config(&self) -> bool {
         self.phone_number_id.is_some() && self.session_path.is_some()
+    }
+
+    #[must_use]
+    pub fn effective_group_reply_mode(&self) -> GroupReplyMode {
+        resolve_group_reply_mode(
+            self.group_reply.as_ref(),
+            Some(self.mention_only),
+            GroupReplyMode::AllMessages,
+        )
+    }
+
+    #[must_use]
+    pub fn group_reply_allowed_sender_ids(&self) -> Vec<String> {
+        clone_group_reply_allowed_sender_ids(self.group_reply.as_ref())
     }
 }
 
@@ -11745,6 +11770,9 @@ allowed_sender_ids = ["U111", "U222"]
             pair_code: None,
             allowed_numbers: vec!["+1234567890".into(), "+9876543210".into()],
             allowed_groups: vec![],
+            mention_only: false,
+            mention_name: None,
+            group_reply: None,
         };
         let json = serde_json::to_string(&wc).unwrap();
         let parsed: WhatsAppConfig = serde_json::from_str(&json).unwrap();
@@ -11766,6 +11794,9 @@ allowed_sender_ids = ["U111", "U222"]
             pair_code: None,
             allowed_numbers: vec!["+1".into()],
             allowed_groups: vec![],
+            mention_only: false,
+            mention_name: None,
+            group_reply: None,
         };
         let toml_str = toml::to_string(&wc).unwrap();
         let parsed: WhatsAppConfig = toml::from_str(&toml_str).unwrap();
@@ -11793,6 +11824,9 @@ allowed_sender_ids = ["U111", "U222"]
             pair_code: None,
             allowed_numbers: vec!["*".into()],
             allowed_groups: vec![],
+            mention_only: false,
+            mention_name: None,
+            group_reply: None,
         };
         let toml_str = toml::to_string(&wc).unwrap();
         let parsed: WhatsAppConfig = toml::from_str(&toml_str).unwrap();
@@ -11811,6 +11845,9 @@ allowed_sender_ids = ["U111", "U222"]
             pair_code: None,
             allowed_numbers: vec!["+1".into()],
             allowed_groups: vec![],
+            mention_only: false,
+            mention_name: None,
+            group_reply: None,
         };
         assert!(wc.is_ambiguous_config());
         assert_eq!(wc.backend_type(), "cloud");
@@ -11828,6 +11865,9 @@ allowed_sender_ids = ["U111", "U222"]
             pair_code: None,
             allowed_numbers: vec![],
             allowed_groups: vec![],
+            mention_only: false,
+            mention_name: None,
+            group_reply: None,
         };
         assert!(!wc.is_ambiguous_config());
         assert_eq!(wc.backend_type(), "web");
@@ -11856,6 +11896,9 @@ allowed_sender_ids = ["U111", "U222"]
                 pair_code: None,
                 allowed_numbers: vec!["+1".into()],
                 allowed_groups: vec![],
+                mention_only: false,
+                mention_name: None,
+                group_reply: None,
             }),
             linq: None,
             github: None,

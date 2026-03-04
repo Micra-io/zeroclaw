@@ -5409,6 +5409,9 @@ fn collect_configured_channels(
                                 wa.pair_code.clone(),
                                 wa.allowed_numbers.clone(),
                                 wa.allowed_groups.clone(),
+                                wa.effective_group_reply_mode().requires_mention(),
+                                wa.mention_name.clone(),
+                                wa.group_reply_allowed_sender_ids(),
                             )
                             .with_transcription(config.transcription.clone()),
                         ),

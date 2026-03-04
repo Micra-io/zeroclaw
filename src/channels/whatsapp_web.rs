@@ -205,6 +205,12 @@ pub struct WhatsAppWebChannel {
     allowed_numbers: Vec<String>,
     /// Allowed group JIDs, "dm" for DMs only, "*" for all groups, or empty for all chats
     allowed_groups: Vec<String>,
+    /// When true, only respond to group messages that mention the bot by name
+    mention_only: bool,
+    /// Bot name for text-based mention detection (case-insensitive)
+    mention_name: Option<String>,
+    /// Sender IDs that bypass mention gating in group chats
+    group_reply_allowed_sender_ids: Vec<String>,
     /// Bot handle for shutdown
     bot_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Client handle for sending messages and typing indicators
@@ -231,6 +237,9 @@ impl WhatsAppWebChannel {
         pair_code: Option<String>,
         allowed_numbers: Vec<String>,
         allowed_groups: Vec<String>,
+        mention_only: bool,
+        mention_name: Option<String>,
+        group_reply_allowed_sender_ids: Vec<String>,
     ) -> Self {
         Self {
             session_path,
@@ -238,6 +247,9 @@ impl WhatsAppWebChannel {
             pair_code,
             allowed_numbers,
             allowed_groups,
+            mention_only,
+            mention_name,
+            group_reply_allowed_sender_ids,
             bot_handle: Arc::new(Mutex::new(None)),
             client: Arc::new(Mutex::new(None)),
             tx: Arc::new(Mutex::new(None)),
@@ -307,6 +319,12 @@ impl WhatsAppWebChannel {
     #[cfg(feature = "whatsapp-web")]
     fn is_jid(recipient: &str) -> bool {
         recipient.trim().contains('@')
+    }
+
+    /// Check if message text contains the bot's mention name (case-insensitive).
+    #[cfg(feature = "whatsapp-web")]
+    fn contains_mention(text: &str, mention_name: &str) -> bool {
+        text.to_lowercase().contains(&mention_name.to_lowercase())
     }
 
     /// Render a WhatsApp pairing QR payload into terminal-friendly text.
@@ -588,6 +606,9 @@ impl Channel for WhatsAppWebChannel {
         let allowed_numbers = self.allowed_numbers.clone();
         let transcription = self.transcription.clone();
         let allowed_groups = self.allowed_groups.clone();
+        let mention_only = self.mention_only;
+        let mention_name = self.mention_name.clone();
+        let group_reply_allowed_sender_ids = self.group_reply_allowed_sender_ids.clone();
 
         let mut builder = Bot::builder()
             .with_backend(backend)
@@ -598,6 +619,9 @@ impl Channel for WhatsAppWebChannel {
                 let allowed_numbers = allowed_numbers.clone();
                 let transcription = transcription.clone();
                 let allowed_groups = allowed_groups.clone();
+                let mention_only = mention_only;
+                let mention_name = mention_name.clone();
+                let group_reply_allowed_sender_ids = group_reply_allowed_sender_ids.clone();
                 async move {
                     match event {
                         Event::Message(msg, info) => {
@@ -629,6 +653,26 @@ impl Channel for WhatsAppWebChannel {
                                         chat, normalized
                                     );
                                     return;
+                                }
+
+                                // Mention-only filter: skip group messages that don't mention the bot
+                                let is_group = chat.ends_with("@g.us");
+                                if mention_only && is_group {
+                                    let sender_bypassed = group_reply_allowed_sender_ids
+                                        .iter()
+                                        .any(|id| id == &normalized || id == &sender);
+                                    if !sender_bypassed {
+                                        let mentioned = mention_name.as_deref().map_or(false, |name| {
+                                            Self::contains_mention(text, name)
+                                        });
+                                        if !mentioned {
+                                            tracing::debug!(
+                                                "WhatsApp Web: mention_only=true, no mention found in group message from {}, skipping",
+                                                normalized
+                                            );
+                                            return;
+                                        }
+                                    }
                                 }
 
                                 let trimmed = text.trim();
