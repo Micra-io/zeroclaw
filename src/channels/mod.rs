@@ -833,6 +833,7 @@ fn build_channel_system_prompt(
     channel_name: &str,
     reply_target: &str,
     expose_internal_tool_details: bool,
+    workspace_dir: &Path,
 ) -> String {
     let mut prompt = base_prompt.to_string();
     crate::agent::prompt::refresh_prompt_datetime(&mut prompt);
@@ -842,6 +843,16 @@ fn build_channel_system_prompt(
             prompt = instructions.to_string();
         } else {
             prompt = format!("{prompt}\n\n{instructions}");
+        }
+    }
+
+    // Inject channel-specific workspace config if present
+    let channel_file = workspace_dir.join(format!("CHANNEL_{channel_name}.md"));
+    if let Ok(content) = std::fs::read_to_string(&channel_file) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            use std::fmt::Write;
+            let _ = write!(prompt, "\n\n### CHANNEL_{channel_name}.md\n\n{trimmed}");
         }
     }
 
@@ -3905,6 +3916,7 @@ If this input is legitimate, rephrase the request and avoid instruction-override
         &msg.channel,
         &msg.reply_target,
         expose_internal_tool_details,
+        ctx.workspace_dir.as_path(),
     );
     system_prompt.push_str(&build_runtime_tool_visibility_prompt(
         ctx.tools_registry.as_ref(),
@@ -12136,22 +12148,48 @@ Done reminder set for 1:38 AM."#;
 
     #[test]
     fn build_channel_system_prompt_includes_visibility_policy() {
-        let hidden = build_channel_system_prompt("base", "telegram", "chat", false);
+        let tmp = tempfile::tempdir().unwrap();
+        let hidden =
+            build_channel_system_prompt("base", "telegram", "chat", false, tmp.path());
         assert!(hidden.contains("run tools/functions in the background"));
         assert!(hidden.contains("Do not reveal raw tool names"));
 
-        let exposed = build_channel_system_prompt("base", "telegram", "chat", true);
+        let exposed =
+            build_channel_system_prompt("base", "telegram", "chat", true, tmp.path());
         assert!(exposed.contains("user explicitly requested command/tool details"));
     }
 
     #[test]
     fn build_channel_system_prompt_refreshes_datetime_section() {
+        let tmp = tempfile::tempdir().unwrap();
         let base_prompt =
             "## Current Date & Time\n\n2000-01-01 00:00:00 (UTC)\n\n## Runtime\n\nHost: test";
-        let rendered = build_channel_system_prompt(base_prompt, "telegram", "chat", false);
+        let rendered =
+            build_channel_system_prompt(base_prompt, "telegram", "chat", false, tmp.path());
         assert!(!rendered.contains("2000-01-01 00:00:00 (UTC)"));
         assert!(rendered.contains("## Current Date & Time\n\n"));
         assert!(rendered.contains("## Runtime\n\nHost: test"));
+    }
+
+    #[test]
+    fn build_channel_system_prompt_injects_channel_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("CHANNEL_telegram.md"),
+            "Use Telegram markdown formatting.\nKeep messages under 4096 chars.",
+        )
+        .unwrap();
+
+        let prompt =
+            build_channel_system_prompt("base", "telegram", "chat", false, tmp.path());
+        assert!(prompt.contains("### CHANNEL_telegram.md"));
+        assert!(prompt.contains("Use Telegram markdown formatting."));
+        assert!(prompt.contains("Keep messages under 4096 chars."));
+
+        // Absent channel file should not inject anything
+        let prompt2 =
+            build_channel_system_prompt("base", "slack", "chat", false, tmp.path());
+        assert!(!prompt2.contains("CHANNEL_slack.md"));
     }
 
     #[test]
