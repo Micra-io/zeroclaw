@@ -284,6 +284,7 @@ Sync procedure:
 4. Force-push rebased feature branches to origin: `git push origin <branch> --force-with-lease`
 
 Rules:
+- Always sync upstream before starting new feature work — branch from updated main.
 - Never push directly to upstream.
 - Never submit PRs to `zeroclaw-labs/zeroclaw` — PRs target the fork's own `main`.
 - Resolve rebase conflicts locally before pushing.
