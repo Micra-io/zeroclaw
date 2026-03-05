@@ -1324,6 +1324,9 @@ mod tests {
             pair_code: None,
             allowed_numbers: vec!["*".into()],
             allowed_groups: vec![],
+            group_reply: None,
+            mention_name: None,
+            mention_only: false,
         });
 
         let mut job = test_job("echo ok");

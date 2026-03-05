@@ -991,6 +991,9 @@ mod tests {
             None,
             vec!["+1234567890".into()],
             vec![],
+            false,
+            None,
+            vec![],
         )
     }
 
@@ -1013,7 +1016,7 @@ mod tests {
     #[cfg(feature = "whatsapp-web")]
     fn whatsapp_web_number_allowed_wildcard() {
         let ch =
-            WhatsAppWebChannel::new("/tmp/test.db".into(), None, None, vec!["*".into()], vec![]);
+            WhatsAppWebChannel::new("/tmp/test.db".into(), None, None, vec!["*".into()], vec![], false, None, vec![]);
         assert!(ch.is_number_allowed("+1234567890"));
         assert!(ch.is_number_allowed("+9999999999"));
     }
@@ -1021,7 +1024,7 @@ mod tests {
     #[test]
     #[cfg(feature = "whatsapp-web")]
     fn whatsapp_web_number_denied_empty() {
-        let ch = WhatsAppWebChannel::new("/tmp/test.db".into(), None, None, vec![], vec![]);
+        let ch = WhatsAppWebChannel::new("/tmp/test.db".into(), None, None, vec![], vec![], false, None, vec![]);
         // Empty allowlist means "deny all" (matches channel-wide allowlist policy).
         assert!(!ch.is_number_allowed("+1234567890"));
     }

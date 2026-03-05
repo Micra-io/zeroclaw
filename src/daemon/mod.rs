@@ -947,6 +947,9 @@ mod tests {
             pair_code: None,
             allowed_numbers: vec!["*".into()],
             allowed_groups: vec![],
+            group_reply: None,
+            mention_name: None,
+            mention_only: false,
         });
 
         let target = heartbeat_delivery_target(&config).unwrap();
@@ -971,6 +974,9 @@ mod tests {
             pair_code: None,
             allowed_numbers: vec!["*".into()],
             allowed_groups: vec![],
+            group_reply: None,
+            mention_name: None,
+            mention_only: false,
         });
 
         let err = heartbeat_delivery_target(&config).unwrap_err();
