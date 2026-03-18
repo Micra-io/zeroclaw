@@ -3486,6 +3486,8 @@ fn collect_configured_channels(
                                 wa.pair_code.clone(),
                                 wa.allowed_numbers.clone(),
                                 wa.allowed_groups.clone(),
+                                wa.mention_only,
+                                wa.mention_name.clone(),
                             )
                             .with_transcription(config.transcription.clone())
                             .with_tts(config.tts.clone()),

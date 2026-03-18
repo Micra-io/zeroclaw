@@ -4260,6 +4260,8 @@ fn setup_channels() -> Result<ChannelsConfig> {
                             .then(|| pair_code.trim().to_string()),
                         allowed_numbers,
                         allowed_groups: vec![],
+                        mention_only: false,
+                        mention_name: None,
                     });
 
                     println!(
@@ -4362,6 +4364,8 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     pair_code: None,
                     allowed_numbers,
                     allowed_groups: vec![],
+                    mention_only: false,
+                    mention_name: None,
                 });
             }
             ChannelMenuChoice::Linq => {

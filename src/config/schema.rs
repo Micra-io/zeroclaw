@@ -4767,6 +4767,14 @@ pub struct WhatsAppConfig {
     /// Allowed group chats (JID or "*" for all, "dm" for direct messages only)
     #[serde(default)]
     pub allowed_groups: Vec<String>,
+    /// When true, only respond to messages that mention the bot's name in groups.
+    /// Direct messages are always processed.
+    #[serde(default)]
+    pub mention_only: bool,
+    /// Bot name used for text-based mention detection in groups (e.g. "claw").
+    /// Case-insensitive. Only used when mention_only = true.
+    #[serde(default)]
+    pub mention_name: Option<String>,
 }
 
 impl ChannelConfig for WhatsAppConfig {
@@ -9296,6 +9304,8 @@ channel_id = "C123"
             pair_code: None,
             allowed_numbers: vec!["+1234567890".into(), "+9876543210".into()],
             allowed_groups: vec![],
+            mention_only: false,
+            mention_name: None,
         };
         let json = serde_json::to_string(&wc).unwrap();
         let parsed: WhatsAppConfig = serde_json::from_str(&json).unwrap();
@@ -9317,6 +9327,8 @@ channel_id = "C123"
             pair_code: None,
             allowed_numbers: vec!["+1".into()],
             allowed_groups: vec![],
+            mention_only: false,
+            mention_name: None,
         };
         let toml_str = toml::to_string(&wc).unwrap();
         let parsed: WhatsAppConfig = toml::from_str(&toml_str).unwrap();
@@ -9343,6 +9355,8 @@ channel_id = "C123"
             pair_code: None,
             allowed_numbers: vec!["*".into()],
             allowed_groups: vec![],
+            mention_only: false,
+            mention_name: None,
         };
         let toml_str = toml::to_string(&wc).unwrap();
         let parsed: WhatsAppConfig = toml::from_str(&toml_str).unwrap();
@@ -9361,6 +9375,8 @@ channel_id = "C123"
             pair_code: None,
             allowed_numbers: vec!["+1".into()],
             allowed_groups: vec![],
+            mention_only: false,
+            mention_name: None,
         };
         assert!(wc.is_ambiguous_config());
         assert_eq!(wc.backend_type(), "cloud");
@@ -9378,6 +9394,8 @@ channel_id = "C123"
             pair_code: None,
             allowed_numbers: vec![],
             allowed_groups: vec![],
+            mention_only: false,
+            mention_name: None,
         };
         assert!(!wc.is_ambiguous_config());
         assert_eq!(wc.backend_type(), "web");
@@ -9405,6 +9423,8 @@ channel_id = "C123"
                 pair_code: None,
                 allowed_numbers: vec!["+1".into()],
                 allowed_groups: vec![],
+                mention_only: false,
+                mention_name: None,
             }),
             linq: None,
             wati: None,
