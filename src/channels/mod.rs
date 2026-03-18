@@ -546,6 +546,7 @@ fn build_channel_system_prompt(
     base_prompt: &str,
     channel_name: &str,
     reply_target: &str,
+    workspace_dir: &Path,
 ) -> String {
     let mut prompt = base_prompt.to_string();
 
@@ -573,6 +574,16 @@ fn build_channel_system_prompt(
             prompt = instructions.to_string();
         } else {
             prompt = format!("{prompt}\n\n{instructions}");
+        }
+    }
+
+    // Inject channel-specific workspace config if present
+    let channel_file = workspace_dir.join(format!("CHANNEL_{channel_name}.md"));
+    if let Ok(content) = std::fs::read_to_string(&channel_file) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            use std::fmt::Write;
+            let _ = write!(prompt, "\n\n### CHANNEL_{channel_name}.md\n\n{trimmed}");
         }
     }
 
@@ -2089,8 +2100,12 @@ async fn process_channel_message(
         }
     }
 
-    let system_prompt =
-        build_channel_system_prompt(ctx.system_prompt.as_str(), &msg.channel, &msg.reply_target);
+    let system_prompt = build_channel_system_prompt(
+        ctx.system_prompt.as_str(),
+        &msg.channel,
+        &msg.reply_target,
+        ctx.workspace_dir.as_path(),
+    );
     let mut history = vec![ChatMessage::system(system_prompt)];
     history.extend(prior_turns);
     let use_streaming = target_channel
@@ -3470,6 +3485,7 @@ fn collect_configured_channels(
                                 wa.pair_phone.clone(),
                                 wa.pair_code.clone(),
                                 wa.allowed_numbers.clone(),
+                                wa.allowed_groups.clone(),
                             )
                             .with_transcription(config.transcription.clone())
                             .with_tts(config.tts.clone()),
@@ -8682,5 +8698,24 @@ This is an example JSON object for profile settings."#;
             Ok(channel) => assert_eq!(channel.name(), "telegram"),
             Err(e) => panic!("should succeed when telegram is configured: {e}"),
         }
+    }
+
+    #[test]
+    fn build_channel_system_prompt_injects_channel_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("CHANNEL_telegram.md"),
+            "Use Telegram markdown formatting.\nKeep messages under 4096 chars.",
+        )
+        .unwrap();
+
+        let prompt = build_channel_system_prompt("base", "telegram", "chat", tmp.path());
+        assert!(prompt.contains("### CHANNEL_telegram.md"));
+        assert!(prompt.contains("Use Telegram markdown formatting."));
+        assert!(prompt.contains("Keep messages under 4096 chars."));
+
+        // Absent channel file should not inject anything
+        let prompt2 = build_channel_system_prompt("base", "slack", "chat", tmp.path());
+        assert!(!prompt2.contains("CHANNEL_slack.md"));
     }
 }
