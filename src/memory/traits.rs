@@ -11,6 +11,9 @@ pub struct MemoryEntry {
     pub timestamp: String,
     pub session_id: Option<String>,
     pub score: Option<f64>,
+    /// Arbitrary JSON metadata (e.g. group_jid for WhatsApp group messages).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl std::fmt::Debug for MemoryEntry {
@@ -109,6 +112,21 @@ pub trait Memory: Send + Sync {
 
     /// Health check
     async fn health_check(&self) -> bool;
+
+    /// Store a memory entry with optional JSON metadata.
+    ///
+    /// Default implementation delegates to [`store`] and discards metadata.
+    /// Override in backends that support metadata persistence (e.g. SQLite).
+    async fn store_with_metadata(
+        &self,
+        key: &str,
+        content: &str,
+        category: MemoryCategory,
+        session_id: Option<&str>,
+        _metadata: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.store(key, content, category, session_id).await
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +174,7 @@ mod tests {
             timestamp: "2026-02-16T00:00:00Z".into(),
             session_id: Some("session-abc".into()),
             score: Some(0.98),
+            metadata: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();
