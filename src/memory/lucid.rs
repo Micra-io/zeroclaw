@@ -226,6 +226,7 @@ impl LucidMemory {
                 timestamp: now.clone(),
                 session_id: None,
                 score: Some((1.0 - rank as f64 * 0.05).max(0.1)),
+                metadata: None,
             });
         }
 
@@ -315,6 +316,21 @@ impl Memory for LucidMemory {
     ) -> anyhow::Result<()> {
         self.local
             .store(key, content, category.clone(), session_id)
+            .await?;
+        self.sync_to_lucid_async(key, content, &category).await;
+        Ok(())
+    }
+
+    async fn store_with_metadata(
+        &self,
+        key: &str,
+        content: &str,
+        category: MemoryCategory,
+        session_id: Option<&str>,
+        metadata: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.local
+            .store_with_metadata(key, content, category.clone(), session_id, metadata)
             .await?;
         self.sync_to_lucid_async(key, content, &category).await;
         Ok(())

@@ -172,15 +172,19 @@ impl SqliteMemory {
         )?;
 
         // Migration: add session_id column if not present (safe to run repeatedly)
-        let has_session_id: bool = conn
+        let schema_sql: String = conn
             .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'")?
-            .query_row([], |row| row.get::<_, String>(0))?
-            .contains("session_id");
-        if !has_session_id {
+            .query_row([], |row| row.get::<_, String>(0))?;
+        if !schema_sql.contains("session_id") {
             conn.execute_batch(
                 "ALTER TABLE memories ADD COLUMN session_id TEXT;
                  CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);",
             )?;
+        }
+
+        // Migration: add metadata column if not present (safe to run repeatedly)
+        if !schema_sql.contains("metadata") {
+            conn.execute_batch("ALTER TABLE memories ADD COLUMN metadata TEXT;")?;
         }
 
         Ok(())
@@ -476,6 +480,48 @@ impl Memory for SqliteMemory {
         .await?
     }
 
+    async fn store_with_metadata(
+        &self,
+        key: &str,
+        content: &str,
+        category: MemoryCategory,
+        session_id: Option<&str>,
+        metadata: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let embedding_bytes = self
+            .get_or_compute_embedding(content)
+            .await?
+            .map(|emb| vector::vec_to_bytes(&emb));
+
+        let conn = self.conn.clone();
+        let key = key.to_string();
+        let content = content.to_string();
+        let sid = session_id.map(String::from);
+        let meta = metadata.map(String::from);
+
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let conn = conn.lock();
+            let now = Local::now().to_rfc3339();
+            let cat = Self::category_to_str(&category);
+            let id = Uuid::new_v4().to_string();
+
+            conn.execute(
+                "INSERT INTO memories (id, key, content, category, embedding, created_at, updated_at, session_id, metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(key) DO UPDATE SET
+                    content = excluded.content,
+                    category = excluded.category,
+                    embedding = excluded.embedding,
+                    updated_at = excluded.updated_at,
+                    session_id = excluded.session_id,
+                    metadata = excluded.metadata",
+                params![id, key, content, cat, embedding_bytes, now, now, sid, meta],
+            )?;
+            Ok(())
+        })
+        .await?
+    }
+
     async fn recall(
         &self,
         query: &str,
@@ -539,7 +585,7 @@ impl Memory for SqliteMemory {
                     .collect::<Vec<_>>()
                     .join(", ");
                 let sql = format!(
-                    "SELECT id, key, content, category, created_at, session_id \
+                    "SELECT id, key, content, category, created_at, session_id, metadata \
                      FROM memories WHERE id IN ({placeholders})"
                 );
                 let mut stmt = conn.prepare(&sql)?;
@@ -557,17 +603,18 @@ impl Memory for SqliteMemory {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
                     ))
                 })?;
 
                 let mut entry_map = std::collections::HashMap::new();
                 for row in rows {
-                    let (id, key, content, cat, ts, sid) = row?;
-                    entry_map.insert(id, (key, content, cat, ts, sid));
+                    let (id, key, content, cat, ts, sid, meta) = row?;
+                    entry_map.insert(id, (key, content, cat, ts, sid, meta));
                 }
 
                 for scored in &merged {
-                    if let Some((key, content, cat, ts, sid)) = entry_map.remove(&scored.id) {
+                    if let Some((key, content, cat, ts, sid, meta)) = entry_map.remove(&scored.id) {
                         let entry = MemoryEntry {
                             id: scored.id.clone(),
                             key,
@@ -576,6 +623,7 @@ impl Memory for SqliteMemory {
                             timestamp: ts,
                             session_id: sid,
                             score: Some(f64::from(scored.final_score)),
+                            metadata: meta.and_then(|m| serde_json::from_str(&m).ok()),
                         };
                         if let Some(filter_sid) = session_ref {
                             if entry.session_id.as_deref() != Some(filter_sid) {
@@ -607,7 +655,7 @@ impl Memory for SqliteMemory {
                         .collect();
                     let where_clause = conditions.join(" OR ");
                     let sql = format!(
-                        "SELECT id, key, content, category, created_at, session_id FROM memories
+                        "SELECT id, key, content, category, created_at, session_id, metadata FROM memories
                          WHERE {where_clause}
                          ORDER BY updated_at DESC
                          LIMIT ?{}",
@@ -624,6 +672,7 @@ impl Memory for SqliteMemory {
                     let params_ref: Vec<&dyn rusqlite::types::ToSql> =
                         param_values.iter().map(AsRef::as_ref).collect();
                     let rows = stmt.query_map(params_ref.as_slice(), |row| {
+                        let meta: Option<String> = row.get(6)?;
                         Ok(MemoryEntry {
                             id: row.get(0)?,
                             key: row.get(1)?,
@@ -632,6 +681,7 @@ impl Memory for SqliteMemory {
                             timestamp: row.get(4)?,
                             session_id: row.get(5)?,
                             score: Some(1.0),
+                            metadata: meta.and_then(|m| serde_json::from_str(&m).ok()),
                         })
                     })?;
                     for row in rows {
@@ -659,10 +709,11 @@ impl Memory for SqliteMemory {
         tokio::task::spawn_blocking(move || -> anyhow::Result<Option<MemoryEntry>> {
             let conn = conn.lock();
             let mut stmt = conn.prepare(
-                "SELECT id, key, content, category, created_at, session_id FROM memories WHERE key = ?1",
+                "SELECT id, key, content, category, created_at, session_id, metadata FROM memories WHERE key = ?1",
             )?;
 
             let mut rows = stmt.query_map(params![key], |row| {
+                let meta: Option<String> = row.get(6)?;
                 Ok(MemoryEntry {
                     id: row.get(0)?,
                     key: row.get(1)?,
@@ -671,6 +722,7 @@ impl Memory for SqliteMemory {
                     timestamp: row.get(4)?,
                     session_id: row.get(5)?,
                     score: None,
+                    metadata: meta.and_then(|m| serde_json::from_str(&m).ok()),
                 })
             })?;
 
@@ -699,6 +751,7 @@ impl Memory for SqliteMemory {
             let mut results = Vec::new();
 
             let row_mapper = |row: &rusqlite::Row| -> rusqlite::Result<MemoryEntry> {
+                let meta: Option<String> = row.get(6)?;
                 Ok(MemoryEntry {
                     id: row.get(0)?,
                     key: row.get(1)?,
@@ -707,13 +760,14 @@ impl Memory for SqliteMemory {
                     timestamp: row.get(4)?,
                     session_id: row.get(5)?,
                     score: None,
+                    metadata: meta.and_then(|m| serde_json::from_str(&m).ok()),
                 })
             };
 
             if let Some(ref cat) = category {
                 let cat_str = Self::category_to_str(cat);
                 let mut stmt = conn.prepare(
-                    "SELECT id, key, content, category, created_at, session_id FROM memories
+                    "SELECT id, key, content, category, created_at, session_id, metadata FROM memories
                      WHERE category = ?1 ORDER BY updated_at DESC LIMIT ?2",
                 )?;
                 let rows = stmt.query_map(params![cat_str, DEFAULT_LIST_LIMIT], row_mapper)?;
@@ -728,7 +782,7 @@ impl Memory for SqliteMemory {
                 }
             } else {
                 let mut stmt = conn.prepare(
-                    "SELECT id, key, content, category, created_at, session_id FROM memories
+                    "SELECT id, key, content, category, created_at, session_id, metadata FROM memories
                      ORDER BY updated_at DESC LIMIT ?1",
                 )?;
                 let rows = stmt.query_map(params![DEFAULT_LIST_LIMIT], row_mapper)?;
