@@ -60,6 +60,10 @@ pub struct WhatsAppWebChannel {
     allowed_numbers: Vec<String>,
     /// Allowed group chats (JID, "*", or "dm")
     allowed_groups: Vec<String>,
+    /// When true, only respond to group messages that mention the bot by name
+    mention_only: bool,
+    /// Bot name for text-based mention detection (case-insensitive)
+    mention_name: Option<String>,
     /// Bot handle for shutdown
     bot_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Client handle for sending messages and typing indicators
@@ -96,6 +100,8 @@ impl WhatsAppWebChannel {
         pair_code: Option<String>,
         allowed_numbers: Vec<String>,
         allowed_groups: Vec<String>,
+        mention_only: bool,
+        mention_name: Option<String>,
     ) -> Self {
         Self {
             session_path,
@@ -103,6 +109,8 @@ impl WhatsAppWebChannel {
             pair_code,
             allowed_numbers,
             allowed_groups,
+            mention_only,
+            mention_name,
             bot_handle: Arc::new(Mutex::new(None)),
             client: Arc::new(Mutex::new(None)),
             tx: Arc::new(Mutex::new(None)),
@@ -129,6 +137,12 @@ impl WhatsAppWebChannel {
             self.tts_config = Some(config);
         }
         self
+    }
+
+    /// Check if message text contains the bot's mention name (case-insensitive).
+    #[cfg(feature = "whatsapp-web")]
+    fn contains_mention(text: &str, mention_name: &str) -> bool {
+        text.to_lowercase().contains(&mention_name.to_lowercase())
     }
 
     /// Check if a phone number is allowed (E.164 format: +1234567890)
@@ -652,6 +666,8 @@ impl Channel for WhatsAppWebChannel {
             let tx_clone = tx.clone();
             let allowed_numbers = self.allowed_numbers.clone();
             let allowed_groups = self.allowed_groups.clone();
+            let mention_only = self.mention_only;
+            let mention_name = self.mention_name.clone();
             let logout_tx_clone = logout_tx.clone();
             let retry_count_clone = retry_count.clone();
             let session_revoked_clone = session_revoked.clone();
@@ -668,6 +684,8 @@ impl Channel for WhatsAppWebChannel {
                     let tx_inner = tx_clone.clone();
                     let allowed_numbers = allowed_numbers.clone();
                     let allowed_groups = allowed_groups.clone();
+                    let mention_only = mention_only;
+                    let mention_name = mention_name.clone();
                     let logout_tx = logout_tx_clone.clone();
                     let retry_count = retry_count_clone.clone();
                     let session_revoked = session_revoked_clone.clone();
@@ -716,6 +734,22 @@ impl Channel for WhatsAppWebChannel {
                                         chat, normalized
                                     );
                                     return;
+                                }
+
+                                // Mention-only filter: skip group messages that don't mention the bot
+                                let is_group = chat.ends_with("@g.us");
+                                if mention_only && is_group {
+                                    let text = msg.text_content().unwrap_or("");
+                                    let mentioned = mention_name.as_deref().map_or(false, |name| {
+                                        Self::contains_mention(text, name)
+                                    });
+                                    if !mentioned {
+                                        tracing::debug!(
+                                            "WhatsApp Web: mention_only=true, no mention found in group message from {}, skipping",
+                                            normalized
+                                        );
+                                        return;
+                                    }
                                 }
 
                                 // Attempt voice note transcription (ptt = push-to-talk = voice note)
@@ -1020,6 +1054,9 @@ impl WhatsAppWebChannel {
         _pair_phone: Option<String>,
         _pair_code: Option<String>,
         _allowed_numbers: Vec<String>,
+        _allowed_groups: Vec<String>,
+        _mention_only: bool,
+        _mention_name: Option<String>,
     ) -> Self {
         Self { _private: () }
     }
@@ -1087,6 +1124,8 @@ mod tests {
             None,
             vec!["+1234567890".into()],
             vec![],
+            false,
+            None,
         )
     }
 
@@ -1109,7 +1148,7 @@ mod tests {
     #[cfg(feature = "whatsapp-web")]
     fn whatsapp_web_number_allowed_wildcard() {
         let ch =
-            WhatsAppWebChannel::new("/tmp/test.db".into(), None, None, vec!["*".into()], vec![]);
+            WhatsAppWebChannel::new("/tmp/test.db".into(), None, None, vec!["*".into()], vec![], false, None);
         assert!(ch.is_number_allowed("+1234567890"));
         assert!(ch.is_number_allowed("+9999999999"));
     }
@@ -1117,7 +1156,7 @@ mod tests {
     #[test]
     #[cfg(feature = "whatsapp-web")]
     fn whatsapp_web_number_denied_empty() {
-        let ch = WhatsAppWebChannel::new("/tmp/test.db".into(), None, None, vec![], vec![]);
+        let ch = WhatsAppWebChannel::new("/tmp/test.db".into(), None, None, vec![], vec![], false, None);
         // Empty allowlist means "deny all" (matches channel-wide allowlist policy).
         assert!(!ch.is_number_allowed("+1234567890"));
     }
