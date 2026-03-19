@@ -89,6 +89,8 @@ pub use whatsapp::WhatsAppChannel;
 #[cfg(feature = "whatsapp-web")]
 pub use whatsapp_web::WhatsAppWebChannel;
 
+use session_backend::SessionBackend;
+
 use crate::agent::loop_::{build_tool_instructions, run_tool_call_loop, scrub_credentials};
 use crate::approval::ApprovalManager;
 use crate::config::Config;
@@ -333,7 +335,7 @@ struct ChannelRuntimeContext {
     query_classification: crate::config::QueryClassificationConfig,
     ack_reactions: bool,
     show_tool_calls: bool,
-    session_store: Option<Arc<session_store::SessionStore>>,
+    session_store: Option<Arc<dyn session_backend::SessionBackend>>,
     /// Non-interactive approval manager for channel-driven runs.
     /// Enforces `auto_approve` / `always_ask` / supervised policy from
     /// `[autonomy]` config; auto-denies tools that would need interactive
@@ -384,10 +386,11 @@ fn conversation_memory_key(msg: &traits::ChannelMessage) -> String {
 }
 
 fn conversation_history_key(msg: &traits::ChannelMessage) -> String {
-    // Include thread_ts for per-topic session isolation in forum groups
+    // Include reply_target for per-context isolation (group/channel/DM)
+    // and thread_ts for per-topic isolation in forum groups.
     match &msg.thread_ts {
-        Some(tid) => format!("{}_{}_{}", msg.channel, tid, msg.sender),
-        None => format!("{}_{}", msg.channel, msg.sender),
+        Some(tid) => format!("{}_{}_{}_{}", msg.channel, msg.reply_target, tid, msg.sender),
+        None => format!("{}_{}_{}", msg.channel, msg.reply_target, msg.sender),
     }
 }
 
@@ -4203,14 +4206,39 @@ pub async fn start_channels(config: Config) -> Result<()> {
         ack_reactions: config.channels_config.ack_reactions,
         show_tool_calls: config.channels_config.show_tool_calls,
         session_store: if config.channels_config.session_persistence {
-            match session_store::SessionStore::new(&config.workspace_dir) {
-                Ok(store) => {
-                    tracing::info!("📂 Session persistence enabled");
-                    Some(Arc::new(store))
+            if config.channels_config.session_backend == "jsonl" {
+                match session_store::SessionStore::new(&config.workspace_dir) {
+                    Ok(store) => {
+                        tracing::info!("📂 Session persistence enabled (JSONL)");
+                        Some(Arc::new(store) as Arc<dyn session_backend::SessionBackend>)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Session persistence disabled: {e}");
+                        None
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Session persistence disabled: {e}");
-                    None
+            } else {
+                match session_sqlite::SqliteSessionBackend::new(&config.workspace_dir) {
+                    Ok(backend) => {
+                        if let Ok(migrated) = backend.migrate_from_jsonl(&config.workspace_dir) {
+                            if migrated > 0 {
+                                tracing::info!("📂 Migrated {migrated} JSONL session(s) to SQLite");
+                            }
+                        }
+                        if config.channels_config.session_ttl_hours > 0 {
+                            if let Ok(cleaned) = backend.cleanup_stale(config.channels_config.session_ttl_hours) {
+                                if cleaned > 0 {
+                                    tracing::info!("📂 Cleaned up {cleaned} stale channel session(s)");
+                                }
+                            }
+                        }
+                        tracing::info!("📂 Session persistence enabled (SQLite)");
+                        Some(Arc::new(backend) as Arc<dyn session_backend::SessionBackend>)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Session persistence disabled: {e}");
+                        None
+                    }
                 }
             }
         } else {
@@ -4220,7 +4248,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         activated_tools: ch_activated_handle,
     });
 
-    // Hydrate in-memory conversation histories from persisted JSONL session files.
+    // Hydrate in-memory conversation histories from persisted session store.
     if let Some(ref store) = runtime_ctx.session_store {
         let mut hydrated = 0usize;
         let mut histories = runtime_ctx
@@ -4764,7 +4792,7 @@ mod tests {
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
-            session_store: Some(Arc::clone(&store)),
+            session_store: Some(Arc::clone(&store) as Arc<dyn session_backend::SessionBackend>),
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -5403,7 +5431,7 @@ BTC is currently around $65,000 based on latest tool output."#
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let turns = histories
-            .get("telegram_alice")
+            .get("telegram_chat-telegram_alice")
             .expect("telegram history should be stored");
         let assistant_turn = turns
             .iter()
@@ -5638,7 +5666,7 @@ BTC is currently around $65,000 based on latest tool output."#
         assert_eq!(sent.len(), 1);
         assert!(sent[0].contains("Provider switched to `openrouter`"));
 
-        let route_key = "telegram_alice";
+        let route_key = "telegram_chat-1_alice";
         let route = runtime_ctx
             .route_overrides
             .lock()
@@ -5670,7 +5698,7 @@ BTC is currently around $65,000 based on latest tool output."#
         provider_cache_seed.insert("test-provider".to_string(), Arc::clone(&default_provider));
         provider_cache_seed.insert("openrouter".to_string(), routed_provider);
 
-        let route_key = "telegram_alice".to_string();
+        let route_key = "telegram_chat-1_alice".to_string();
         let mut route_overrides = HashMap::new();
         route_overrides.insert(
             route_key,
@@ -7473,7 +7501,7 @@ BTC is currently around $65,000 based on latest tool output."#
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let turns = histories
-            .get("test-channel_alice")
+            .get("test-channel_chat-ctx_alice")
             .expect("history should be stored for sender");
         assert_eq!(turns[0].role, "user");
         assert_eq!(turns[0].content, "hello");
@@ -7491,7 +7519,7 @@ BTC is currently around $65,000 based on latest tool output."#
         let provider_impl = Arc::new(HistoryCaptureProvider::default());
         let mut histories = HashMap::new();
         histories.insert(
-            "telegram_alice".to_string(),
+            "telegram_chat-telegram_alice".to_string(),
             vec![
                 ChatMessage::assistant("stale assistant"),
                 ChatMessage::user("earlier user question"),
@@ -8230,7 +8258,7 @@ This is an example JSON object for profile settings."#;
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let turns = histories
-            .get("test-channel_zeroclaw_user")
+            .get("test-channel_chat-photo_zeroclaw_user")
             .expect("history should exist for sender");
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
