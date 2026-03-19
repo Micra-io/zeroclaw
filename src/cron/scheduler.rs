@@ -447,9 +447,7 @@ pub(crate) async fn deliver_announcement(
                     "whatsapp channel not available for delivery (channel not running or not configured)"
                 )
             })?;
-            live_channel
-                .send(&SendMessage::new(output, target))
-                .await?;
+            live_channel.send(&SendMessage::new(output, target)).await?;
         }
         other => anyhow::bail!("unsupported delivery channel: {other}"),
     }
@@ -1243,7 +1241,10 @@ mod tests {
         let mock = Arc::new(MockWhatsAppChannel::new());
         let mut channels: std::collections::HashMap<String, Arc<dyn crate::channels::Channel>> =
             std::collections::HashMap::new();
-        channels.insert("whatsapp".to_string(), mock.clone() as Arc<dyn crate::channels::Channel>);
+        channels.insert(
+            "whatsapp".to_string(),
+            mock.clone() as Arc<dyn crate::channels::Channel>,
+        );
         crate::channels::register_live_channels(&channels);
 
         let tmp = TempDir::new().unwrap();
