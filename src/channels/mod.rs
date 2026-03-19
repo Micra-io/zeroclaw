@@ -282,6 +282,33 @@ fn runtime_config_store() -> &'static Mutex<HashMap<PathBuf, RuntimeConfigState>
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Process-global registry of live channel instances for cross-component
+/// delivery (cron scheduler, heartbeat). Populated by `start_channels()`.
+fn live_channel_registry() -> &'static parking_lot::RwLock<HashMap<String, Arc<dyn Channel>>> {
+    static REGISTRY: OnceLock<parking_lot::RwLock<HashMap<String, Arc<dyn Channel>>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| parking_lot::RwLock::new(HashMap::new()))
+}
+
+/// Register live channel instances so the cron scheduler and heartbeat
+/// can deliver messages through stateful channels (e.g. WhatsApp Web).
+pub(crate) fn register_live_channels(channels: &HashMap<String, Arc<dyn Channel>>) {
+    let mut registry = live_channel_registry().write();
+    *registry = channels.clone();
+}
+
+/// Clear the live channel registry (called before channel restart).
+pub(crate) fn clear_live_channels() {
+    let mut registry = live_channel_registry().write();
+    registry.clear();
+}
+
+/// Look up a live channel by name for delivery.
+pub(crate) fn get_live_channel(name: &str) -> Option<Arc<dyn Channel>> {
+    let registry = live_channel_registry().read();
+    registry.get(name).cloned()
+}
+
 const SYSTEMD_STATUS_ARGS: [&str; 3] = ["--user", "is-active", "zeroclaw.service"];
 const SYSTEMD_RESTART_ARGS: [&str; 3] = ["--user", "restart", "zeroclaw.service"];
 const OPENRC_STATUS_ARGS: [&str; 2] = ["zeroclaw", "status"];
