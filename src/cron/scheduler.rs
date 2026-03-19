@@ -441,6 +441,16 @@ pub(crate) async fn deliver_announcement(
                 anyhow::bail!("matrix delivery channel requires `channel-matrix` feature");
             }
         }
+        "whatsapp" | "whatsapp_web" => {
+            let live_channel = crate::channels::get_live_channel("whatsapp").ok_or_else(|| {
+                anyhow::anyhow!(
+                    "whatsapp channel not available for delivery (channel not running or not configured)"
+                )
+            })?;
+            live_channel
+                .send(&SendMessage::new(output, target))
+                .await?;
+        }
         other => anyhow::bail!("unsupported delivery channel: {other}"),
     }
 
