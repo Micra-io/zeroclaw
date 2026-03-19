@@ -1152,4 +1152,108 @@ mod tests {
             .to_string()
             .contains("matrix delivery channel requires `channel-matrix` feature"));
     }
+
+    /// Minimal mock channel for testing live channel delivery.
+    struct MockWhatsAppChannel {
+        sent: tokio::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl MockWhatsAppChannel {
+        fn new() -> Self {
+            Self {
+                sent: tokio::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::channels::Channel for MockWhatsAppChannel {
+        fn name(&self) -> &str {
+            "whatsapp"
+        }
+
+        async fn send(&self, message: &crate::channels::SendMessage) -> anyhow::Result<()> {
+            self.sent
+                .lock()
+                .await
+                .push((message.recipient.clone(), message.content.clone()));
+            Ok(())
+        }
+
+        async fn listen(
+            &self,
+            _tx: tokio::sync::mpsc::Sender<crate::channels::traits::ChannelMessage>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Serialize tests that mutate the global live-channel registry so they
+    /// don't interfere with each other when `cargo test` runs them in parallel.
+    static LIVE_CHANNEL_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    #[tokio::test]
+    async fn deliver_announcement_whatsapp_fails_without_live_channel() {
+        let _guard = LIVE_CHANNEL_LOCK.lock().await;
+        crate::channels::clear_live_channels();
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+
+        let err = deliver_announcement(&config, "whatsapp", "120363407513744860@g.us", "hello")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not available"),
+            "Expected 'not available' error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_announcement_whatsapp_web_variant_also_handled() {
+        let _guard = LIVE_CHANNEL_LOCK.lock().await;
+        crate::channels::clear_live_channels();
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+
+        let err = deliver_announcement(&config, "whatsapp_web", "120363407513744860@g.us", "hello")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not available"),
+            "Expected 'not available' error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_announcement_whatsapp_uses_live_channel() {
+        let _guard = LIVE_CHANNEL_LOCK.lock().await;
+        crate::channels::clear_live_channels();
+
+        let mock = Arc::new(MockWhatsAppChannel::new());
+        let mut channels: std::collections::HashMap<String, Arc<dyn crate::channels::Channel>> =
+            std::collections::HashMap::new();
+        channels.insert("whatsapp".to_string(), mock.clone() as Arc<dyn crate::channels::Channel>);
+        crate::channels::register_live_channels(&channels);
+
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+
+        let result = deliver_announcement(
+            &config,
+            "whatsapp",
+            "120363407513744860@g.us",
+            "Good morning!",
+        )
+        .await;
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+
+        let sent = mock.sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "120363407513744860@g.us");
+        assert_eq!(sent[0].1, "Good morning!");
+
+        // Clean up global state
+        crate::channels::clear_live_channels();
+    }
 }
