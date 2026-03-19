@@ -282,6 +282,33 @@ fn runtime_config_store() -> &'static Mutex<HashMap<PathBuf, RuntimeConfigState>
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Process-global registry of live channel instances for cross-component
+/// delivery (cron scheduler, heartbeat). Populated by `start_channels()`.
+fn live_channel_registry() -> &'static parking_lot::RwLock<HashMap<String, Arc<dyn Channel>>> {
+    static REGISTRY: OnceLock<parking_lot::RwLock<HashMap<String, Arc<dyn Channel>>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| parking_lot::RwLock::new(HashMap::new()))
+}
+
+/// Register live channel instances so the cron scheduler and heartbeat
+/// can deliver messages through stateful channels (e.g. WhatsApp Web).
+pub(crate) fn register_live_channels(channels: &HashMap<String, Arc<dyn Channel>>) {
+    let mut registry = live_channel_registry().write();
+    *registry = channels.clone();
+}
+
+/// Clear the live channel registry (called before channel restart).
+pub(crate) fn clear_live_channels() {
+    let mut registry = live_channel_registry().write();
+    registry.clear();
+}
+
+/// Look up a live channel by name for delivery.
+pub(crate) fn get_live_channel(name: &str) -> Option<Arc<dyn Channel>> {
+    let registry = live_channel_registry().read();
+    registry.get(name).cloned()
+}
+
 const SYSTEMD_STATUS_ARGS: [&str; 3] = ["--user", "is-active", "zeroclaw.service"];
 const SYSTEMD_RESTART_ARGS: [&str; 3] = ["--user", "restart", "zeroclaw.service"];
 const OPENRC_STATUS_ARGS: [&str; 2] = ["zeroclaw", "status"];
@@ -389,7 +416,10 @@ fn conversation_history_key(msg: &traits::ChannelMessage) -> String {
     // Include reply_target for per-context isolation (group/channel/DM)
     // and thread_ts for per-topic isolation in forum groups.
     match &msg.thread_ts {
-        Some(tid) => format!("{}_{}_{}_{}", msg.channel, msg.reply_target, tid, msg.sender),
+        Some(tid) => format!(
+            "{}_{}_{}_{}",
+            msg.channel, msg.reply_target, tid, msg.sender
+        ),
         None => format!("{}_{}_{}", msg.channel, msg.reply_target, msg.sender),
     }
 }
@@ -3808,6 +3838,9 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
 /// Start all configured channels and route messages to the agent
 #[allow(clippy::too_many_lines)]
 pub async fn start_channels(config: Config) -> Result<()> {
+    // Clear stale live channel references before rebuilding.
+    clear_live_channels();
+
     let provider_name = resolved_default_provider(&config);
     let provider_runtime_options = providers::ProviderRuntimeOptions {
         auth_profile_override: None,
@@ -4139,6 +4172,9 @@ pub async fn start_channels(config: Config) -> Result<()> {
             .map(|ch| (ch.name().to_string(), Arc::clone(ch)))
             .collect::<HashMap<_, _>>(),
     );
+
+    register_live_channels(&channels_by_name);
+
     let max_in_flight_messages = compute_max_in_flight_messages(channels.len());
 
     println!("  🚦 In-flight message limit: {max_in_flight_messages}");
@@ -4226,9 +4262,13 @@ pub async fn start_channels(config: Config) -> Result<()> {
                             }
                         }
                         if config.channels_config.session_ttl_hours > 0 {
-                            if let Ok(cleaned) = backend.cleanup_stale(config.channels_config.session_ttl_hours) {
+                            if let Ok(cleaned) =
+                                backend.cleanup_stale(config.channels_config.session_ttl_hours)
+                            {
                                 if cleaned > 0 {
-                                    tracing::info!("📂 Cleaned up {cleaned} stale channel session(s)");
+                                    tracing::info!(
+                                        "📂 Cleaned up {cleaned} stale channel session(s)"
+                                    );
                                 }
                             }
                         }
