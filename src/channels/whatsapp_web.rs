@@ -83,7 +83,10 @@ pub struct WhatsAppWebChannel {
         Arc<std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>>,
     /// Chats whose last incoming message was a voice note.
     voice_chats: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    /// Passive observer store — writes non-mention group messages for downstream scanning.
+    /// Passive observer store — writes all group messages (including non-mention)
+    /// to sessions.db for downstream scanner consumption. Opens a second
+    /// SqliteSessionBackend connection to the same DB file; this is safe because
+    /// SQLite WAL mode supports concurrent writers.
     observe_store: Option<Arc<SqliteSessionBackend>>,
 }
 
@@ -689,8 +692,6 @@ impl Channel for WhatsAppWebChannel {
             let retry_count_clone = retry_count.clone();
             let session_revoked_clone = session_revoked.clone();
             let transcription_config = self.transcription.clone();
-
-            let transcription_config = self.transcription.clone();
             let voice_chats = self.voice_chats.clone();
             let observe_store = self.observe_store.clone();
 
@@ -918,6 +919,28 @@ impl Channel for WhatsAppWebChannel {
                                         normalized
                                     );
                                     return;
+                                }
+
+                                // Passively store group contact shares for scanner.
+                                if is_group && is_contact {
+                                    if let Some(ref store) = observe_store {
+                                        let session_key =
+                                            format!("observe_whatsapp_{}", chat);
+                                        let formatted =
+                                            format!("[{}] {}", normalized, content);
+                                        let turn =
+                                            crate::providers::traits::ChatMessage {
+                                                role: "user".to_string(),
+                                                content: formatted,
+                                            };
+                                        if let Err(e) =
+                                            store.append(&session_key, &turn)
+                                        {
+                                            tracing::warn!(
+                                                "WhatsApp Web: failed to write passive contact observation: {e}"
+                                            );
+                                        }
+                                    }
                                 }
 
                                 if let Err(e) = tx_inner
