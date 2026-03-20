@@ -26,6 +26,7 @@
 //! This channel is automatically selected when `session_path` is set in the config.
 //! The Cloud API channel is used when `phone_number_id` is set.
 
+use super::session_sqlite::SqliteSessionBackend;
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use super::whatsapp_storage::RusqliteStore;
 use anyhow::{anyhow, Result};
@@ -81,6 +82,8 @@ pub struct WhatsAppWebChannel {
         Arc<std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>>,
     /// Chats whose last incoming message was a voice note.
     voice_chats: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Passive observer store — writes non-mention group messages for downstream scanning.
+    observe_store: Option<Arc<SqliteSessionBackend>>,
 }
 
 impl WhatsAppWebChannel {
@@ -102,7 +105,19 @@ impl WhatsAppWebChannel {
         allowed_groups: Vec<String>,
         mention_only: bool,
         mention_name: Option<String>,
+        workspace_dir: Option<std::path::PathBuf>,
     ) -> Self {
+        let observe_store = workspace_dir.and_then(|dir| match SqliteSessionBackend::new(&dir) {
+            Ok(backend) => {
+                tracing::info!("WhatsApp Web: passive observer store enabled");
+                Some(Arc::new(backend))
+            }
+            Err(e) => {
+                tracing::warn!("WhatsApp Web: failed to open observer store: {e}");
+                None
+            }
+        });
+
         Self {
             session_path,
             pair_phone,
@@ -118,6 +133,7 @@ impl WhatsAppWebChannel {
             tts_config: None,
             pending_voice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             voice_chats: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            observe_store,
         }
     }
 
@@ -1127,6 +1143,7 @@ impl WhatsAppWebChannel {
         _allowed_groups: Vec<String>,
         _mention_only: bool,
         _mention_name: Option<String>,
+        _workspace_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self { _private: () }
     }
@@ -1226,6 +1243,7 @@ mod tests {
             vec![],
             false,
             None,
+            None,
         )
     }
 
@@ -1247,8 +1265,16 @@ mod tests {
     #[test]
     #[cfg(feature = "whatsapp-web")]
     fn whatsapp_web_number_allowed_wildcard() {
-        let ch =
-            WhatsAppWebChannel::new("/tmp/test.db".into(), None, None, vec!["*".into()], vec![], false, None);
+        let ch = WhatsAppWebChannel::new(
+            "/tmp/test.db".into(),
+            None,
+            None,
+            vec!["*".into()],
+            vec![],
+            false,
+            None,
+            None,
+        );
         assert!(ch.is_number_allowed("+1234567890"));
         assert!(ch.is_number_allowed("+9999999999"));
     }
@@ -1256,7 +1282,16 @@ mod tests {
     #[test]
     #[cfg(feature = "whatsapp-web")]
     fn whatsapp_web_number_denied_empty() {
-        let ch = WhatsAppWebChannel::new("/tmp/test.db".into(), None, None, vec![], vec![], false, None);
+        let ch = WhatsAppWebChannel::new(
+            "/tmp/test.db".into(),
+            None,
+            None,
+            vec![],
+            vec![],
+            false,
+            None,
+            None,
+        );
         // Empty allowlist means "deny all" (matches channel-wide allowlist policy).
         assert!(!ch.is_number_allowed("+1234567890"));
     }
