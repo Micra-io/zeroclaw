@@ -105,15 +105,41 @@ impl WhatsAppChannel {
                         continue;
                     }
 
-                    // Extract text content (support text messages only for now)
+                    // Extract message content by type
+                    let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
                     let content = if let Some(text_obj) = msg.get("text") {
                         text_obj
                             .get("body")
                             .and_then(|b| b.as_str())
                             .unwrap_or("")
                             .to_string()
+                    } else if msg_type == "contacts" {
+                        if let Some(contacts) = msg.get("contacts").and_then(|c| c.as_array()) {
+                            let lines: Vec<String> = contacts
+                                .iter()
+                                .filter_map(|c| {
+                                    let name = c
+                                        .get("name")
+                                        .and_then(|n| n.get("formatted_name"))
+                                        .and_then(|n| n.as_str())?;
+                                    let phone = c
+                                        .get("phones")
+                                        .and_then(|p| p.as_array())
+                                        .and_then(|p| p.first())
+                                        .and_then(|p| p.get("phone"))
+                                        .and_then(|p| p.as_str());
+                                    if let Some(phone) = phone {
+                                        Some(format!("[Contact] {name} | {phone}"))
+                                    } else {
+                                        Some(format!("[Contact] {name}"))
+                                    }
+                                })
+                                .collect();
+                            lines.join("\n")
+                        } else {
+                            continue;
+                        }
                     } else {
-                        // Could be image, audio, etc. — skip for now
                         tracing::debug!("WhatsApp: skipping non-text message from {from}");
                         continue;
                     };
@@ -841,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn whatsapp_parse_contacts_message_skipped() {
+    fn whatsapp_parse_contacts_message_extracted() {
         let ch = WhatsAppChannel::new("tok".into(), "123".into(), "ver".into(), vec!["*".into()]);
         let payload = serde_json::json!({
             "entry": [{
@@ -858,7 +884,8 @@ mod tests {
             }]
         });
         let msgs = ch.parse_webhook_payload(&payload);
-        assert!(msgs.is_empty());
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "[Contact] John");
     }
 
     #[test]
@@ -1134,5 +1161,117 @@ mod tests {
             msgs[0].content,
             "<script>alert('xss')</script> & \"quotes\" 'apostrophe'"
         );
+    }
+
+    #[test]
+    fn whatsapp_parse_single_contact_message() {
+        let ch = WhatsAppChannel::new("tok".into(), "123".into(), "ver".into(), vec!["*".into()]);
+        let payload = serde_json::json!({
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "messages": [{
+                            "from": "111",
+                            "timestamp": "1",
+                            "type": "contacts",
+                            "contacts": [{
+                                "name": { "formatted_name": "Pedro Garcia" },
+                                "phones": [{ "phone": "+34612345678" }]
+                            }]
+                        }]
+                    }
+                }]
+            }]
+        });
+        let msgs = ch.parse_webhook_payload(&payload);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "[Contact] Pedro Garcia | +34612345678");
+    }
+
+    #[test]
+    fn whatsapp_parse_multi_contact_message() {
+        let ch = WhatsAppChannel::new("tok".into(), "123".into(), "ver".into(), vec!["*".into()]);
+        let payload = serde_json::json!({
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "messages": [{
+                            "from": "111",
+                            "timestamp": "1",
+                            "type": "contacts",
+                            "contacts": [
+                                {
+                                    "name": { "formatted_name": "Alice" },
+                                    "phones": [{ "phone": "+111" }]
+                                },
+                                {
+                                    "name": { "formatted_name": "Bob" },
+                                    "phones": [{ "phone": "+222" }]
+                                }
+                            ]
+                        }]
+                    }
+                }]
+            }]
+        });
+        let msgs = ch.parse_webhook_payload(&payload);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(
+            msgs[0].content,
+            "[Contact] Alice | +111\n[Contact] Bob | +222"
+        );
+    }
+
+    #[test]
+    fn whatsapp_parse_contact_missing_phone() {
+        let ch = WhatsAppChannel::new("tok".into(), "123".into(), "ver".into(), vec!["*".into()]);
+        let payload = serde_json::json!({
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "messages": [{
+                            "from": "111",
+                            "timestamp": "1",
+                            "type": "contacts",
+                            "contacts": [{
+                                "name": { "formatted_name": "Unknown Person" },
+                                "phones": []
+                            }]
+                        }]
+                    }
+                }]
+            }]
+        });
+        let msgs = ch.parse_webhook_payload(&payload);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "[Contact] Unknown Person");
+    }
+
+    #[test]
+    fn whatsapp_parse_contact_multiple_phones() {
+        let ch = WhatsAppChannel::new("tok".into(), "123".into(), "ver".into(), vec!["*".into()]);
+        let payload = serde_json::json!({
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "messages": [{
+                            "from": "111",
+                            "timestamp": "1",
+                            "type": "contacts",
+                            "contacts": [{
+                                "name": { "formatted_name": "Multi Phone" },
+                                "phones": [
+                                    { "phone": "+111" },
+                                    { "phone": "+222" }
+                                ]
+                            }]
+                        }]
+                    }
+                }]
+            }]
+        });
+        let msgs = ch.parse_webhook_payload(&payload);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "[Contact] Multi Phone | +111");
     }
 }
