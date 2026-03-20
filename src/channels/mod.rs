@@ -3527,6 +3527,7 @@ fn collect_configured_channels(
                                 wa.allowed_groups.clone(),
                                 wa.mention_only,
                                 wa.mention_name.clone(),
+                                Some(config.workspace_dir.clone()),
                             )
                             .with_transcription(config.transcription.clone())
                             .with_tts(config.tts.clone()),
