@@ -736,9 +736,12 @@ impl Channel for WhatsAppWebChannel {
                                     return;
                                 }
 
-                                // Mention-only filter: skip group messages that don't mention the bot
+                                // Mention-only filter: skip group messages that don't mention the bot.
+                                // Contact shares bypass this filter (no text to mention in).
                                 let is_group = chat.ends_with("@g.us");
-                                if mention_only && is_group {
+                                let is_contact = msg.contact_message.is_some()
+                                    || msg.contacts_array_message.is_some();
+                                if mention_only && is_group && !is_contact {
                                     let text = msg.text_content().unwrap_or("");
                                     let mentioned = mention_name.as_deref().map_or(false, |name| {
                                         Self::contains_mention(text, name)
