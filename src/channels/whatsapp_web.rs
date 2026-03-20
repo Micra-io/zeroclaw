@@ -26,6 +26,7 @@
 //! This channel is automatically selected when `session_path` is set in the config.
 //! The Cloud API channel is used when `phone_number_id` is set.
 
+use super::session_backend::SessionBackend;
 use super::session_sqlite::SqliteSessionBackend;
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use super::whatsapp_storage::RusqliteStore;
@@ -691,6 +692,7 @@ impl Channel for WhatsAppWebChannel {
 
             let transcription_config = self.transcription.clone();
             let voice_chats = self.voice_chats.clone();
+            let observe_store = self.observe_store.clone();
 
             let mut builder = Bot::builder()
                 .with_backend(backend)
@@ -707,6 +709,7 @@ impl Channel for WhatsAppWebChannel {
                     let session_revoked = session_revoked_clone.clone();
                     let transcription_config = transcription_config.clone();
                     let voice_chats = voice_chats.clone();
+                    let observe_store = observe_store.clone();
                     async move {
                         match event {
                             Event::Message(msg, info) => {
@@ -763,6 +766,30 @@ impl Channel for WhatsAppWebChannel {
                                         Self::contains_mention(text, name)
                                     });
                                     if !mentioned {
+                                        // Passive observation: store non-mention group
+                                        // messages for downstream scanner consumption.
+                                        if let Some(ref store) = observe_store {
+                                            let text =
+                                                msg.text_content().unwrap_or("").to_string();
+                                            if !text.is_empty() {
+                                                let session_key =
+                                                    format!("observe_whatsapp_{}", chat);
+                                                let formatted =
+                                                    format!("[{}] {}", normalized, text);
+                                                let turn =
+                                                    crate::providers::traits::ChatMessage {
+                                                        role: "user".to_string(),
+                                                        content: formatted,
+                                                    };
+                                                if let Err(e) =
+                                                    store.append(&session_key, &turn)
+                                                {
+                                                    tracing::warn!(
+                                                        "WhatsApp Web: failed to write passive observation: {e}"
+                                                    );
+                                                }
+                                            }
+                                        }
                                         tracing::debug!(
                                             "WhatsApp Web: mention_only=true, no mention found in group message from {}, skipping",
                                             normalized
@@ -1531,5 +1558,65 @@ mod tests {
             super::format_contact_line("Pedro Garcia", None),
             "[Contact] Pedro Garcia"
         );
+    }
+
+    // ── Passive observer store tests ──
+
+    #[test]
+    fn observe_store_writes_non_mention_group_messages() {
+        use crate::channels::session_backend::SessionBackend;
+        use crate::channels::session_sqlite::SqliteSessionBackend;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let group_jid = "120363407668337348@g.us";
+        let sender = "+34622922443";
+        let content = "Hey, does anyone know a good plumber?";
+        let session_key = format!("observe_whatsapp_{group_jid}");
+        let formatted = format!("[{sender}] {content}");
+
+        let turn = crate::providers::traits::ChatMessage {
+            role: "user".to_string(),
+            content: formatted.clone(),
+        };
+        backend.append(&session_key, &turn).unwrap();
+
+        let loaded = backend.load(&session_key);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].role, "user");
+        assert_eq!(loaded[0].content, formatted);
+    }
+
+    #[test]
+    fn observe_store_groups_multiple_senders_chronologically() {
+        use crate::channels::session_backend::SessionBackend;
+        use crate::channels::session_sqlite::SqliteSessionBackend;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let group_jid = "120363407668337348@g.us";
+        let session_key = format!("observe_whatsapp_{group_jid}");
+
+        let messages = vec![
+            "[+34622922443] Anyone know a good plumber?",
+            "[+5484790698122] Try Pedro at +34655444333, he's great",
+            "[+34622922443] Thanks!",
+        ];
+
+        for content in &messages {
+            let turn = crate::providers::traits::ChatMessage {
+                role: "user".to_string(),
+                content: content.to_string(),
+            };
+            backend.append(&session_key, &turn).unwrap();
+        }
+
+        let loaded = backend.load(&session_key);
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded[0].content, messages[0]);
+        assert_eq!(loaded[1].content, messages[1]);
+        assert_eq!(loaded[2].content, messages[2]);
     }
 }
