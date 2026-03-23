@@ -4206,6 +4206,9 @@ fn collect_configured_channels(
                                 wa.dm_policy.clone(),
                                 wa.group_policy.clone(),
                                 wa.self_chat_mode,
+                                wa.allowed_groups.clone(),
+                                wa.mention_only,
+                                wa.mention_name.clone(),
                             )
                             .with_transcription(config.transcription.clone())
                             .with_tts(config.tts.clone()),

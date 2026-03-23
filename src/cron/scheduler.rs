@@ -567,6 +567,9 @@ pub(crate) async fn deliver_announcement(
                     wa.dm_policy.clone(),
                     wa.group_policy.clone(),
                     wa.self_chat_mode,
+                    wa.allowed_groups.clone(),
+                    wa.mention_only,
+                    wa.mention_name.clone(),
                 );
                 channel
                     .send(&SendMessage::new(safe_output.as_str(), target))

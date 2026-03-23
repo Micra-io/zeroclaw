@@ -66,6 +66,12 @@ pub struct WhatsAppWebChannel {
     group_policy: crate::config::WhatsAppChatPolicy,
     /// Whether to always respond in self-chat when mode = personal
     self_chat_mode: bool,
+    /// Allowed group chats (JID, "*", or "dm")
+    allowed_groups: Vec<String>,
+    /// When true, only respond to group messages that mention the bot by name
+    mention_only: bool,
+    /// Bot name for text-based mention detection (case-insensitive)
+    mention_name: Option<String>,
     /// Bot handle for shutdown
     bot_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Client handle for sending messages and typing indicators
@@ -100,6 +106,7 @@ impl WhatsAppWebChannel {
     /// * `group_policy` - Group policy when mode = personal
     /// * `self_chat_mode` - Whether to always respond in self-chat when mode = personal
     #[cfg(feature = "whatsapp-web")]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_path: String,
         pair_phone: Option<String>,
@@ -109,6 +116,9 @@ impl WhatsAppWebChannel {
         dm_policy: crate::config::WhatsAppChatPolicy,
         group_policy: crate::config::WhatsAppChatPolicy,
         self_chat_mode: bool,
+        allowed_groups: Vec<String>,
+        mention_only: bool,
+        mention_name: Option<String>,
     ) -> Self {
         Self {
             session_path,
@@ -119,6 +129,9 @@ impl WhatsAppWebChannel {
             dm_policy,
             group_policy,
             self_chat_mode,
+            allowed_groups,
+            mention_only,
+            mention_name,
             bot_handle: Arc::new(Mutex::new(None)),
             client: Arc::new(Mutex::new(None)),
             tx: Arc::new(Mutex::new(None)),
@@ -249,6 +262,36 @@ impl WhatsAppWebChannel {
             .unwrap_or(trimmed);
         let normalized_user = user_part.trim_start_matches('+');
         format!("+{normalized_user}")
+    }
+
+    /// Check if message text contains the bot's mention name (case-insensitive).
+    #[cfg(feature = "whatsapp-web")]
+    fn contains_mention(text: &str, mention_name: &str) -> bool {
+        text.to_lowercase().contains(&mention_name.to_lowercase())
+    }
+
+    /// Check whether a chat JID is allowed by the `allowed_groups` policy.
+    ///
+    /// - `"*"` — allow all chats
+    /// - `"dm"` — allow direct messages
+    /// - explicit JID — prefix or full JID match
+    /// - empty slice — allow all (no restriction)
+    #[cfg(feature = "whatsapp-web")]
+    fn is_chat_allowed(chat: &str, sender: &str, allowed_groups: &[String]) -> bool {
+        if allowed_groups.is_empty() {
+            return true;
+        }
+        let chat_prefix = chat.split('@').next().unwrap_or("");
+        let is_dm = chat.ends_with("@s.whatsapp.net") || chat_prefix == sender;
+
+        let allow_all = allowed_groups.iter().any(|g| g == "*");
+        let allow_dm = allowed_groups.iter().any(|g| g == "dm");
+        let explicit_match = allowed_groups.iter().any(|g| {
+            let g_id = g.split('@').next().unwrap_or("");
+            g_id == chat_prefix || g == chat
+        });
+
+        allow_all || (is_dm && allow_dm) || explicit_match
     }
 
     /// Whether the recipient string is a WhatsApp JID (contains a domain suffix).
@@ -665,6 +708,9 @@ impl Channel for WhatsAppWebChannel {
             let wa_dm_policy = self.dm_policy.clone();
             let wa_group_policy = self.group_policy.clone();
             let wa_self_chat_mode = self.self_chat_mode;
+            let allowed_groups = self.allowed_groups.clone();
+            let mention_only = self.mention_only;
+            let mention_name = self.mention_name.clone();
 
             let mut builder = Bot::builder()
                 .with_backend(backend)
@@ -682,6 +728,9 @@ impl Channel for WhatsAppWebChannel {
                     let wa_mode = wa_mode.clone();
                     let wa_dm_policy = wa_dm_policy.clone();
                     let wa_group_policy = wa_group_policy.clone();
+                    let allowed_groups = allowed_groups.clone();
+                    let mention_only = mention_only;
+                    let mention_name = mention_name.clone();
                     async move {
                         match event {
                             Event::Message(msg, info) => {
@@ -770,6 +819,34 @@ impl Channel for WhatsAppWebChannel {
                                                 // already filtered by allowed_numbers above
                                             }
                                         }
+                                    }
+                                }
+
+                                // Check allowed_groups policy
+                                if !Self::is_chat_allowed(&chat, &sender, &allowed_groups) {
+                                    tracing::debug!(
+                                        "WhatsApp Web: chat {} not in allowed_groups, ignoring message from {}",
+                                        chat, normalized
+                                    );
+                                    return;
+                                }
+
+                                // Mention-only filter: skip group messages that don't mention the bot.
+                                // Contact shares bypass this filter.
+                                let is_group = chat.ends_with("@g.us");
+                                let is_contact = msg.contact_message.is_some()
+                                    || msg.contacts_array_message.is_some();
+                                if mention_only && is_group && !is_contact {
+                                    let text = msg.text_content().unwrap_or("");
+                                    let mentioned = mention_name.as_deref().map_or(false, |name| {
+                                        Self::contains_mention(text, name)
+                                    });
+                                    if !mentioned {
+                                        tracing::debug!(
+                                            "WhatsApp Web: mention_only=true, no mention found in group message from {}, skipping",
+                                            normalized
+                                        );
+                                        return;
                                     }
                                 }
 
@@ -1079,6 +1156,7 @@ pub struct WhatsAppWebChannel {
 
 #[cfg(not(feature = "whatsapp-web"))]
 impl WhatsAppWebChannel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         _session_path: String,
         _pair_phone: Option<String>,
@@ -1088,6 +1166,9 @@ impl WhatsAppWebChannel {
         _dm_policy: crate::config::WhatsAppChatPolicy,
         _group_policy: crate::config::WhatsAppChatPolicy,
         _self_chat_mode: bool,
+        _allowed_groups: Vec<String>,
+        _mention_only: bool,
+        _mention_name: Option<String>,
     ) -> Self {
         Self { _private: () }
     }
@@ -1158,6 +1239,9 @@ mod tests {
             crate::config::WhatsAppChatPolicy::default(),
             crate::config::WhatsAppChatPolicy::default(),
             false,
+            vec![],     // allowed_groups
+            false,      // mention_only
+            None,       // mention_name
         )
     }
 
@@ -1188,6 +1272,9 @@ mod tests {
             crate::config::WhatsAppChatPolicy::default(),
             crate::config::WhatsAppChatPolicy::default(),
             false,
+            vec![],     // allowed_groups
+            false,      // mention_only
+            None,       // mention_name
         );
         assert!(ch.is_number_allowed("+1234567890"));
         assert!(ch.is_number_allowed("+9999999999"));
@@ -1205,6 +1292,9 @@ mod tests {
             crate::config::WhatsAppChatPolicy::default(),
             crate::config::WhatsAppChatPolicy::default(),
             false,
+            vec![],     // allowed_groups
+            false,      // mention_only
+            None,       // mention_name
         );
         // Empty allowlist means "deny all" (matches channel-wide allowlist policy).
         assert!(!ch.is_number_allowed("+1234567890"));
