@@ -244,9 +244,17 @@ mod tests {
     async fn namespace_with_special_characters() {
         let (_tmp, mem) = temp_sqlite();
         let ns = "org/team-alpha/v2";
-        mem.store_with_metadata("k1", "data", MemoryCategory::Core, None, Some(ns), None, None)
-            .await
-            .unwrap();
+        mem.store_with_metadata(
+            "k1",
+            "data",
+            MemoryCategory::Core,
+            None,
+            Some(ns),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let results = mem
             .recall_namespaced(ns, "data", 10, None, None, None)
@@ -982,9 +990,17 @@ mod tests {
         .unwrap();
 
         // Upsert with different importance
-        mem.store_with_metadata("k1", "updated", MemoryCategory::Core, None, None, Some(0.3), None)
-            .await
-            .unwrap();
+        mem.store_with_metadata(
+            "k1",
+            "updated",
+            MemoryCategory::Core,
+            None,
+            None,
+            Some(0.3),
+            None,
+        )
+        .await
+        .unwrap();
 
         let entry = mem.get("k1").await.unwrap().unwrap();
         assert_eq!(entry.content, "updated");
@@ -996,13 +1012,29 @@ mod tests {
     async fn namespace_survives_upsert() {
         let (_tmp, mem) = temp_sqlite();
 
-        mem.store_with_metadata("k1", "v1", MemoryCategory::Core, None, Some("ns-old"), None, None)
-            .await
-            .unwrap();
+        mem.store_with_metadata(
+            "k1",
+            "v1",
+            MemoryCategory::Core,
+            None,
+            Some("ns-old"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
-        mem.store_with_metadata("k1", "v2", MemoryCategory::Core, None, Some("ns-new"), None, None)
-            .await
-            .unwrap();
+        mem.store_with_metadata(
+            "k1",
+            "v2",
+            MemoryCategory::Core,
+            None,
+            Some("ns-new"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let entry = mem.get("k1").await.unwrap().unwrap();
         assert_eq!(entry.namespace, "ns-new");
@@ -1035,9 +1067,17 @@ mod tests {
     async fn empty_namespace_recall_returns_nothing() {
         let (_tmp, mem) = temp_sqlite();
 
-        mem.store_with_metadata("k1", "data", MemoryCategory::Core, None, Some("ns1"), None, None)
-            .await
-            .unwrap();
+        mem.store_with_metadata(
+            "k1",
+            "data",
+            MemoryCategory::Core,
+            None,
+            Some("ns1"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let results = mem
             .recall_namespaced("nonexistent-ns", "data", 10, None, None, None)

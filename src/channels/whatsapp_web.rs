@@ -1356,10 +1356,10 @@ mod tests {
             crate::config::WhatsAppChatPolicy::default(),
             crate::config::WhatsAppChatPolicy::default(),
             false,
-            vec![],     // allowed_groups
-            false,      // mention_only
-            None,       // mention_name
-            None,       // workspace_dir
+            vec![], // allowed_groups
+            false,  // mention_only
+            None,   // mention_name
+            None,   // workspace_dir
         )
     }
 
@@ -1390,10 +1390,10 @@ mod tests {
             crate::config::WhatsAppChatPolicy::default(),
             crate::config::WhatsAppChatPolicy::default(),
             false,
-            vec![],     // allowed_groups
-            false,      // mention_only
-            None,       // mention_name
-            None,       // workspace_dir
+            vec![], // allowed_groups
+            false,  // mention_only
+            None,   // mention_name
+            None,   // workspace_dir
         );
         assert!(ch.is_number_allowed("+1234567890"));
         assert!(ch.is_number_allowed("+9999999999"));
@@ -1411,10 +1411,10 @@ mod tests {
             crate::config::WhatsAppChatPolicy::default(),
             crate::config::WhatsAppChatPolicy::default(),
             false,
-            vec![],     // allowed_groups
-            false,      // mention_only
-            None,       // mention_name
-            None,       // workspace_dir
+            vec![], // allowed_groups
+            false,  // mention_only
+            None,   // mention_name
+            None,   // workspace_dir
         );
         // Empty allowlist means "deny all" (matches channel-wide allowlist policy).
         assert!(!ch.is_number_allowed("+1234567890"));
@@ -1609,9 +1609,13 @@ mod tests {
 
     #[test]
     fn parse_vcard_basic() {
-        let vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Pedro Garcia\nTEL;type=CELL:+34612345678\nEND:VCARD";
+        let vcard =
+            "BEGIN:VCARD\nVERSION:3.0\nFN:Pedro Garcia\nTEL;type=CELL:+34612345678\nEND:VCARD";
         let result = super::parse_vcard_fields(vcard);
-        assert_eq!(result, Some(("Pedro Garcia".to_string(), Some("+34612345678".to_string()))));
+        assert_eq!(
+            result,
+            Some(("Pedro Garcia".to_string(), Some("+34612345678".to_string())))
+        );
     }
 
     #[test]
@@ -1625,7 +1629,10 @@ mod tests {
     fn parse_vcard_multiple_phones_takes_first() {
         let vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Pedro\nTEL;type=CELL:+34611\nTEL;type=HOME:+34622\nEND:VCARD";
         let result = super::parse_vcard_fields(vcard);
-        assert_eq!(result, Some(("Pedro".to_string(), Some("+34611".to_string()))));
+        assert_eq!(
+            result,
+            Some(("Pedro".to_string(), Some("+34611".to_string())))
+        );
     }
 
     #[test]
