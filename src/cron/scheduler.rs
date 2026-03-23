@@ -523,6 +523,7 @@ pub(crate) async fn deliver_announcement(
                     wa.allowed_groups.clone(),
                     wa.mention_only,
                     wa.mention_name.clone(),
+                    None, // workspace_dir (no passive observation in cron)
                 );
                 channel.send(&SendMessage::new(output, target)).await?;
             }

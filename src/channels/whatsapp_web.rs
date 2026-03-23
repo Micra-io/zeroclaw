@@ -26,6 +26,8 @@
 //! This channel is automatically selected when `session_path` is set in the config.
 //! The Cloud API channel is used when `phone_number_id` is set.
 
+use super::session_backend::SessionBackend;
+use super::session_sqlite::SqliteSessionBackend;
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use super::whatsapp_storage::RusqliteStore;
 use anyhow::{anyhow, Result};
@@ -89,6 +91,9 @@ pub struct WhatsAppWebChannel {
         Arc<std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>>,
     /// Chats whose last incoming message was a voice note.
     voice_chats: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Passive observer store — writes all group messages (including non-mention)
+    /// to sessions.db for downstream scanner consumption.
+    observe_store: Option<Arc<SqliteSessionBackend>>,
 }
 
 impl WhatsAppWebChannel {
@@ -118,7 +123,19 @@ impl WhatsAppWebChannel {
         allowed_groups: Vec<String>,
         mention_only: bool,
         mention_name: Option<String>,
+        workspace_dir: Option<std::path::PathBuf>,
     ) -> Self {
+        let observe_store = workspace_dir.and_then(|dir| match SqliteSessionBackend::new(&dir) {
+            Ok(backend) => {
+                tracing::info!("WhatsApp Web: passive observer store enabled");
+                Some(Arc::new(backend))
+            }
+            Err(e) => {
+                tracing::warn!("WhatsApp Web: failed to open observer store: {e}");
+                None
+            }
+        });
+
         Self {
             session_path,
             pair_phone,
@@ -138,6 +155,7 @@ impl WhatsAppWebChannel {
             tts_config: None,
             pending_voice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             voice_chats: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            observe_store,
         }
     }
 
@@ -695,6 +713,7 @@ impl Channel for WhatsAppWebChannel {
             let allowed_groups = self.allowed_groups.clone();
             let mention_only = self.mention_only;
             let mention_name = self.mention_name.clone();
+            let observe_store = self.observe_store.clone();
 
             let mut builder = Bot::builder()
                 .with_backend(backend)
@@ -714,6 +733,7 @@ impl Channel for WhatsAppWebChannel {
                     let allowed_groups = allowed_groups.clone();
                     let mention_only = mention_only;
                     let mention_name = mention_name.clone();
+                    let observe_store = observe_store.clone();
                     async move {
                         match event {
                             Event::Message(msg, info) => {
@@ -825,6 +845,22 @@ impl Channel for WhatsAppWebChannel {
                                         Self::contains_mention(text, name)
                                     });
                                     if !mentioned {
+                                        // Passive observation: store non-mention group
+                                        // messages for downstream scanner consumption.
+                                        if let Some(ref store) = observe_store {
+                                            let text = msg.text_content().unwrap_or("").to_string();
+                                            if !text.is_empty() {
+                                                let session_key = format!("observe_whatsapp_{}", chat);
+                                                let formatted = format!("[{}] {}", normalized, text);
+                                                let turn = crate::providers::traits::ChatMessage {
+                                                    role: "user".to_string(),
+                                                    content: formatted,
+                                                };
+                                                if let Err(e) = store.append(&session_key, &turn) {
+                                                    tracing::warn!("WhatsApp Web: failed to write passive observation: {e}");
+                                                }
+                                            }
+                                        }
                                         tracing::debug!(
                                             "WhatsApp Web: mention_only=true, no mention found in group message from {}, skipping",
                                             normalized
@@ -922,6 +958,21 @@ impl Channel for WhatsAppWebChannel {
                                         normalized
                                     );
                                     return;
+                                }
+
+                                // Passively store group contact shares for scanner.
+                                if is_group && is_contact {
+                                    if let Some(ref store) = observe_store {
+                                        let session_key = format!("observe_whatsapp_{}", chat);
+                                        let formatted = format!("[{}] {}", normalized, content);
+                                        let turn = crate::providers::traits::ChatMessage {
+                                            role: "user".to_string(),
+                                            content: formatted,
+                                        };
+                                        if let Err(e) = store.append(&session_key, &turn) {
+                                            tracing::warn!("WhatsApp Web: failed to write passive contact observation: {e}");
+                                        }
+                                    }
                                 }
 
                                 if let Err(e) = tx_inner
@@ -1181,6 +1232,7 @@ impl WhatsAppWebChannel {
         _allowed_groups: Vec<String>,
         _mention_only: bool,
         _mention_name: Option<String>,
+        _workspace_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self { _private: () }
     }
@@ -1283,6 +1335,7 @@ mod tests {
             vec![],     // allowed_groups
             false,      // mention_only
             None,       // mention_name
+            None,       // workspace_dir
         )
     }
 
@@ -1316,6 +1369,7 @@ mod tests {
             vec![],     // allowed_groups
             false,      // mention_only
             None,       // mention_name
+            None,       // workspace_dir
         );
         assert!(ch.is_number_allowed("+1234567890"));
         assert!(ch.is_number_allowed("+9999999999"));
@@ -1336,6 +1390,7 @@ mod tests {
             vec![],     // allowed_groups
             false,      // mention_only
             None,       // mention_name
+            None,       // workspace_dir
         );
         // Empty allowlist means "deny all" (matches channel-wide allowlist policy).
         assert!(!ch.is_number_allowed("+1234567890"));
@@ -1566,5 +1621,31 @@ mod tests {
             super::format_contact_line("Pedro Garcia", None),
             "[Contact] Pedro Garcia"
         );
+    }
+
+    #[test]
+    fn observe_store_writes_non_mention_group_messages() {
+        use crate::channels::session_backend::SessionBackend;
+        use crate::channels::session_sqlite::SqliteSessionBackend;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let group_jid = "120363407668337348@g.us";
+        let sender = "+34622922443";
+        let content = "Hey, does anyone know a good plumber?";
+        let session_key = format!("observe_whatsapp_{group_jid}");
+        let formatted = format!("[{sender}] {content}");
+
+        let turn = crate::providers::traits::ChatMessage {
+            role: "user".to_string(),
+            content: formatted.clone(),
+        };
+        backend.append(&session_key, &turn).unwrap();
+
+        let loaded = backend.load(&session_key);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].role, "user");
+        assert_eq!(loaded[0].content, formatted);
     }
 }
