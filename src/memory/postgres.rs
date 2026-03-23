@@ -140,6 +140,7 @@ impl PostgresMemory {
             namespace: "default".into(),
             importance: None,
             superseded_by: None,
+            metadata: None,
         })
     }
 }
