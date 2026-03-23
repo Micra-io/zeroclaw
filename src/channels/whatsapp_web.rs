@@ -869,6 +869,42 @@ impl Channel for WhatsAppWebChannel {
                                     text.trim().to_string()
                                 };
 
+                                // Check for contact message if content is still empty
+                                let content = if content.is_empty() {
+                                    if let Some(ref contact) = msg.contact_message {
+                                        if let Some(ref vcard) = contact.vcard {
+                                            if let Some((name, phone)) = parse_vcard_fields(vcard) {
+                                                format_contact_line(&name, phone.as_deref())
+                                            } else {
+                                                contact.display_name.as_deref()
+                                                    .map(|n| format_contact_line(n, None))
+                                                    .unwrap_or_default()
+                                            }
+                                        } else {
+                                            contact.display_name.as_deref()
+                                                .map(|n| format_contact_line(n, None))
+                                                .unwrap_or_default()
+                                        }
+                                    } else if let Some(ref contacts_array) = msg.contacts_array_message {
+                                        let lines: Vec<String> = contacts_array.contacts.iter()
+                                            .filter_map(|c| {
+                                                if let Some(ref vcard) = c.vcard {
+                                                    parse_vcard_fields(vcard)
+                                                        .map(|(name, phone)| format_contact_line(&name, phone.as_deref()))
+                                                        .or_else(|| c.display_name.as_ref().map(|n| format_contact_line(n, None)))
+                                                } else {
+                                                    c.display_name.as_ref().map(|n| format_contact_line(n, None))
+                                                }
+                                            })
+                                            .collect();
+                                        lines.join("\n")
+                                    } else {
+                                        String::new()
+                                    }
+                                } else {
+                                    content
+                                };
+
                                 tracing::info!(
                                     "WhatsApp Web message received (sender_len={}, chat_len={}, content_len={})",
                                     sender.len(),
@@ -1198,6 +1234,35 @@ impl Channel for WhatsAppWebChannel {
     }
 }
 
+/// Parse a vCard 3.0 text into (display_name, first_phone).
+/// Returns None if the vCard has no FN field.
+fn parse_vcard_fields(vcard: &str) -> Option<(String, Option<String>)> {
+    let mut name = None;
+    let mut phone = None;
+    for line in vcard.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("FN:") {
+            name = Some(value.trim().to_string());
+        } else if phone.is_none() {
+            if let Some(rest) = line.strip_prefix("TEL") {
+                if let Some((_params, value)) = rest.split_once(':') {
+                    phone = Some(value.trim().to_string());
+                }
+            }
+        }
+    }
+    name.map(|n| (n, phone))
+}
+
+/// Format a single contact as `[Contact] Name | Phone` or `[Contact] Name`.
+fn format_contact_line(display_name: &str, phone: Option<&str>) -> String {
+    if let Some(phone) = phone {
+        format!("[Contact] {display_name} | {phone}")
+    } else {
+        format!("[Contact] {display_name}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1457,6 +1522,49 @@ mod tests {
                 "/tmp/test.db-wal".to_string(),
                 "/tmp/test.db-shm".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn parse_vcard_basic() {
+        let vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Pedro Garcia\nTEL;type=CELL:+34612345678\nEND:VCARD";
+        let result = super::parse_vcard_fields(vcard);
+        assert_eq!(result, Some(("Pedro Garcia".to_string(), Some("+34612345678".to_string()))));
+    }
+
+    #[test]
+    fn parse_vcard_no_phone() {
+        let vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Mystery Person\nEND:VCARD";
+        let result = super::parse_vcard_fields(vcard);
+        assert_eq!(result, Some(("Mystery Person".to_string(), None)));
+    }
+
+    #[test]
+    fn parse_vcard_multiple_phones_takes_first() {
+        let vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Pedro\nTEL;type=CELL:+34611\nTEL;type=HOME:+34622\nEND:VCARD";
+        let result = super::parse_vcard_fields(vcard);
+        assert_eq!(result, Some(("Pedro".to_string(), Some("+34611".to_string()))));
+    }
+
+    #[test]
+    fn parse_vcard_no_fn_returns_none() {
+        let vcard = "BEGIN:VCARD\nVERSION:3.0\nTEL:+34612345678\nEND:VCARD";
+        assert!(super::parse_vcard_fields(vcard).is_none());
+    }
+
+    #[test]
+    fn format_contact_line_with_phone() {
+        assert_eq!(
+            super::format_contact_line("Pedro Garcia", Some("+34612345678")),
+            "[Contact] Pedro Garcia | +34612345678"
+        );
+    }
+
+    #[test]
+    fn format_contact_line_without_phone() {
+        assert_eq!(
+            super::format_contact_line("Pedro Garcia", None),
+            "[Contact] Pedro Garcia"
         );
     }
 }
