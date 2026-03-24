@@ -408,6 +408,8 @@ struct ChannelRuntimeContext {
     ack_reactions: bool,
     show_tool_calls: bool,
     session_store: Option<Arc<session_store::SessionStore>>,
+    /// SQLite observe store — reads passive group observations for context injection.
+    observe_store: Option<Arc<session_sqlite::SqliteSessionBackend>>,
     /// Non-interactive approval manager for channel-driven runs.
     /// Enforces `auto_approve` / `always_ask` / supervised policy from
     /// `[autonomy]` config; auto-denies tools that would need interactive
@@ -5086,6 +5088,20 @@ pub async fn start_channels(config: Config) -> Result<()> {
         } else {
             None
         },
+        observe_store: if config.channels_config.group_context_window_minutes > 0 {
+            match session_sqlite::SqliteSessionBackend::new(&config.workspace_dir) {
+                Ok(store) => {
+                    tracing::info!("Group context observe store enabled");
+                    Some(Arc::new(store))
+                }
+                Err(e) => {
+                    tracing::warn!("Group context observe store disabled: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        },
         approval_manager: Arc::new(ApprovalManager::for_non_interactive(&config.autonomy)),
         activated_tools: ch_activated_handle,
         cost_tracking: crate::cost::CostTracker::get_or_init_global(
@@ -5467,6 +5483,7 @@ mod tests {
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -5586,6 +5603,7 @@ mod tests {
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -5661,6 +5679,7 @@ mod tests {
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -5755,6 +5774,7 @@ mod tests {
             ack_reactions: true,
             show_tool_calls: true,
             session_store: Some(Arc::clone(&store)),
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6299,6 +6319,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6384,6 +6405,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6483,6 +6505,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6567,6 +6590,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6661,6 +6685,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6776,6 +6801,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6872,6 +6898,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6983,6 +7010,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7079,6 +7107,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7168,6 +7197,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7376,6 +7406,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7483,6 +7514,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7596,6 +7628,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             multimodal: crate::config::MultimodalConfig::default(),
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
@@ -7724,6 +7757,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7825,6 +7859,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7909,6 +7944,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -8690,6 +8726,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -8826,6 +8863,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -9003,6 +9041,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -9115,6 +9154,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -9691,6 +9731,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -9782,6 +9823,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -9949,6 +9991,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -10064,6 +10107,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -10171,6 +10215,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -10298,6 +10343,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -10566,6 +10612,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
