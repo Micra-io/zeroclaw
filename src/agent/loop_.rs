@@ -3584,6 +3584,7 @@ pub async fn run(
     interactive: bool,
     session_state_file: Option<PathBuf>,
     allowed_tools: Option<Vec<String>>,
+    no_memory: bool,
 ) -> Result<String> {
     // ── Wire up agnostic subsystems ──────────────────────────────
     let base_observer = observability::create_observer(&config.observability);
@@ -3594,6 +3595,13 @@ pub async fn run(
         &config.autonomy,
         &config.workspace_dir,
     ));
+
+    // ── Override memory backend when --no-memory is set ───────────
+    let mut config = config;
+    if no_memory {
+        config.memory.backend = "none".to_string();
+        tracing::info!("Memory disabled via --no-memory flag");
+    }
 
     // ── Memory (the brain) ────────────────────────────────────────
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage_and_routes(
@@ -3622,23 +3630,28 @@ pub async fn run(
     } else {
         (None, None)
     };
-    let (mut tools_registry, delegate_handle, _reaction_handle, _channel_map_handle) =
-        tools::all_tools_with_runtime(
-            Arc::new(config.clone()),
-            &security,
-            runtime,
-            mem.clone(),
-            composio_key,
-            composio_entity_id,
-            &config.browser,
-            &config.http_request,
-            &config.web_fetch,
-            &config.workspace_dir,
-            &config.agents,
-            config.api_key.as_deref(),
-            &config,
-            None,
-        );
+    let (
+        mut tools_registry,
+        delegate_handle,
+        _reaction_handle,
+        _channel_map_handle,
+        _ask_user_handle,
+    ) = tools::all_tools_with_runtime(
+        Arc::new(config.clone()),
+        &security,
+        runtime,
+        mem.clone(),
+        composio_key,
+        composio_entity_id,
+        &config.browser,
+        &config.http_request,
+        &config.web_fetch,
+        &config.workspace_dir,
+        &config.agents,
+        config.api_key.as_deref(),
+        &config,
+        None,
+    );
 
     let peripheral_tools: Vec<Box<dyn Tool>> =
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
@@ -4038,6 +4051,14 @@ pub async fn run(
             ChatMessage::system(&system_prompt),
             ChatMessage::user(&enriched),
         ];
+
+        // Prune history for token efficiency (when enabled).
+        if config.agent.history_pruning.enabled {
+            let _stats = crate::agent::history_pruner::prune_history(
+                &mut history,
+                &config.agent.history_pruning,
+            );
+        }
 
         // Compute per-turn excluded MCP tools from tool_filter_groups.
         let excluded_tools = compute_excluded_mcp_tools(
@@ -4460,23 +4481,28 @@ pub async fn process_message(
     } else {
         (None, None)
     };
-    let (mut tools_registry, delegate_handle_pm, _reaction_handle_pm, _channel_map_handle_pm) =
-        tools::all_tools_with_runtime(
-            Arc::new(config.clone()),
-            &security,
-            runtime,
-            mem.clone(),
-            composio_key,
-            composio_entity_id,
-            &config.browser,
-            &config.http_request,
-            &config.web_fetch,
-            &config.workspace_dir,
-            &config.agents,
-            config.api_key.as_deref(),
-            &config,
-            None,
-        );
+    let (
+        mut tools_registry,
+        delegate_handle_pm,
+        _reaction_handle_pm,
+        _channel_map_handle_pm,
+        _ask_user_handle_pm,
+    ) = tools::all_tools_with_runtime(
+        Arc::new(config.clone()),
+        &security,
+        runtime,
+        mem.clone(),
+        composio_key,
+        composio_entity_id,
+        &config.browser,
+        &config.http_request,
+        &config.web_fetch,
+        &config.workspace_dir,
+        &config.agents,
+        config.api_key.as_deref(),
+        &config,
+        None,
+    );
     let peripheral_tools: Vec<Box<dyn Tool>> =
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
     tools_registry.extend(peripheral_tools);
@@ -8214,6 +8240,7 @@ Let me check the result."#;
             mode: ToolFilterGroupMode::Always,
             tools: vec!["mcp_filesystem_*".into()],
             keywords: vec![],
+            filter_builtins: false,
         }];
         let result = filter_tool_specs_for_turn(specs, &groups, "anything");
         let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
@@ -8232,6 +8259,7 @@ Let me check the result."#;
             mode: ToolFilterGroupMode::Dynamic,
             tools: vec!["mcp_browser_*".into()],
             keywords: vec!["browse".into(), "website".into()],
+            filter_builtins: false,
         }];
         let result = filter_tool_specs_for_turn(specs, &groups, "please browse this page");
         let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
@@ -8248,6 +8276,7 @@ Let me check the result."#;
             mode: ToolFilterGroupMode::Dynamic,
             tools: vec!["mcp_browser_*".into()],
             keywords: vec!["browse".into(), "website".into()],
+            filter_builtins: false,
         }];
         let result = filter_tool_specs_for_turn(specs, &groups, "read the file /etc/hosts");
         let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
@@ -8264,6 +8293,7 @@ Let me check the result."#;
             mode: ToolFilterGroupMode::Dynamic,
             tools: vec!["mcp_browser_*".into()],
             keywords: vec!["Browse".into()],
+            filter_builtins: false,
         }];
         let result = filter_tool_specs_for_turn(specs, &groups, "BROWSE the site");
         assert_eq!(result.len(), 1);
