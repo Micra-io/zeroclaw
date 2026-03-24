@@ -248,6 +248,7 @@ async fn run_agent_job(
                 false,
                 None,
                 job.allowed_tools.clone(),
+                false, // no_memory — cron jobs use configured memory
             ))
             .await
         }

@@ -329,6 +329,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 false,
                 None,
                 None,
+                false, // no_memory — heartbeat uses configured memory
             ))
             .await
             {
@@ -389,6 +390,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 false,
                 None,
                 None,
+                false, // no_memory — heartbeat uses configured memory
             ))
             .await
             {

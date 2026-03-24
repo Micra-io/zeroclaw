@@ -228,6 +228,10 @@ Examples:
         /// Attach a peripheral (board:path, e.g. nucleo-f401re:/dev/ttyACM0)
         #[arg(long)]
         peripheral: Vec<String>,
+
+        /// Disable memory persistence (no auto-save, no recall context)
+        #[arg(long)]
+        no_memory: bool,
     },
 
     /// Start/manage the gateway server (webhooks, websockets)
@@ -968,6 +972,7 @@ async fn main() -> Result<()> {
             model,
             temperature,
             peripheral,
+            no_memory,
         } => {
             let final_temperature = temperature.unwrap_or(config.default_temperature);
 
@@ -981,6 +986,7 @@ async fn main() -> Result<()> {
                 true,
                 session_state_file,
                 None,
+                no_memory,
             ))
             .await
             .map(|_| ())
