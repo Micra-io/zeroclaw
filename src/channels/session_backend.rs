@@ -38,6 +38,13 @@ pub trait SessionBackend: Send + Sync {
     /// Load all messages for a session. Returns empty vec if session doesn't exist.
     fn load(&self, session_key: &str) -> Vec<ChatMessage>;
 
+    /// Load messages for a session created at or after `since`.
+    /// Default implementation loads all messages (backends can override for efficiency).
+    fn load_since(&self, session_key: &str, since: DateTime<Utc>) -> Vec<ChatMessage> {
+        let _ = since; // default ignores timestamp — override for filtered queries
+        self.load(session_key)
+    }
+
     /// Append a single message to a session.
     fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()>;
 
