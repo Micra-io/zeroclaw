@@ -2632,6 +2632,32 @@ async fn process_channel_message(
     if !memory_context.is_empty() {
         let _ = write!(system_prompt, "\n\n{memory_context}");
     }
+    // ── Group context injection ──────────────────────────────────
+    // For group mentions, inject recent non-mention messages from the
+    // observe store so the agent understands the conversation context.
+    if msg.reply_target.ends_with("@g.us") {
+        let window = ctx.prompt_config.channels_config.group_context_window_minutes;
+        let max_msgs = ctx.prompt_config.channels_config.group_context_max_messages;
+        if window > 0 {
+            if let Some(ref obs) = ctx.observe_store {
+                let group_context = load_group_context(
+                    obs,
+                    &msg.reply_target,
+                    window,
+                    max_msgs,
+                    2000,
+                );
+                if !group_context.is_empty() {
+                    tracing::info!(
+                        channel = %msg.channel,
+                        group_jid = %msg.reply_target,
+                        "Injecting group context into system prompt"
+                    );
+                    let _ = write!(system_prompt, "\n\n{group_context}");
+                }
+            }
+        }
+    }
     let mut history = vec![ChatMessage::system(system_prompt)];
     history.extend(prior_turns);
     let use_streaming = target_channel
@@ -10811,5 +10837,235 @@ This is an example JSON object for profile settings."#;
         let result = load_group_context(&store, "verbose@g.us", 15, 30, 300);
         assert!(result.contains("Recent Group Conversation"));
         assert!(result.contains("[+4]")); // most recent kept
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_injects_group_context_for_mentions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let observe = Arc::new(
+            session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap(),
+        );
+
+        // Seed observe store with recent group messages
+        {
+            let now = chrono::Utc::now();
+            let conn = observe.conn.lock();
+            for (i, msg) in [
+                "[+111] Does anyone know a plumber?",
+                "[+222] Try Pedro at +34655444333",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let ts = (now - chrono::Duration::seconds(60 - i as i64 * 30)).to_rfc3339();
+                conn.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) \
+                     VALUES (?1, 'user', ?2, ?3)",
+                    rusqlite::params!["observe_whatsapp_testgroup@g.us", msg, ts],
+                )
+                .unwrap();
+            }
+        }
+
+        let channel_impl = Arc::new(RecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let provider_impl = Arc::new(HistoryCaptureProvider::default());
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: provider_impl.clone(),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            prompt_config: Arc::new(crate::config::Config::default()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: crate::config::MultimodalConfig::default(),
+            media_pipeline: crate::config::MediaPipelineConfig::default(),
+            transcription_config: crate::config::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(Vec::new()),
+            query_classification: crate::config::QueryClassificationConfig::default(),
+            ack_reactions: false,
+            show_tool_calls: true,
+            session_store: None,
+            observe_store: Some(observe.clone()),
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &crate::config::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: crate::config::PacingConfig::default(),
+        });
+
+        process_channel_message(
+            runtime_ctx.clone(),
+            traits::ChannelMessage {
+                id: "msg-group-1".to_string(),
+                sender: "+999".to_string(),
+                reply_target: "testgroup@g.us".to_string(),
+                content: "claw, who recommended a plumber?".to_string(),
+                channel: "test-channel".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        let calls = provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 1, "expected exactly one provider call");
+        // calls[0][0] is the system message
+        assert_eq!(calls[0][0].0, "system");
+        assert!(
+            calls[0][0].1.contains("Recent Group Conversation"),
+            "system prompt should contain group context header, got: {}",
+            calls[0][0].1
+        );
+        assert!(
+            calls[0][0].1.contains("plumber"),
+            "system prompt should contain seeded group messages, got: {}",
+            calls[0][0].1
+        );
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_skips_group_context_for_dms() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let observe = Arc::new(
+            session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap(),
+        );
+
+        // Seed observe store with messages under a DM-style key (no @g.us)
+        {
+            let now = chrono::Utc::now();
+            let conn = observe.conn.lock();
+            let ts = (now - chrono::Duration::seconds(30)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO sessions (session_key, role, content, created_at) \
+                 VALUES (?1, 'user', ?2, ?3)",
+                rusqlite::params!["observe_whatsapp_+12345678", "[+111] plumber info", ts],
+            )
+            .unwrap();
+        }
+
+        let channel_impl = Arc::new(RecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let provider_impl = Arc::new(HistoryCaptureProvider::default());
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: provider_impl.clone(),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            prompt_config: Arc::new(crate::config::Config::default()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: crate::config::MultimodalConfig::default(),
+            media_pipeline: crate::config::MediaPipelineConfig::default(),
+            transcription_config: crate::config::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(Vec::new()),
+            query_classification: crate::config::QueryClassificationConfig::default(),
+            ack_reactions: false,
+            show_tool_calls: true,
+            session_store: None,
+            observe_store: Some(observe.clone()),
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &crate::config::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: crate::config::PacingConfig::default(),
+        });
+
+        process_channel_message(
+            runtime_ctx.clone(),
+            traits::ChannelMessage {
+                id: "msg-dm-1".to_string(),
+                sender: "+12345678".to_string(),
+                reply_target: "+12345678".to_string(), // DM: no @g.us suffix
+                content: "who recommended a plumber?".to_string(),
+                channel: "test-channel".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        let calls = provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 1, "expected exactly one provider call");
+        assert_eq!(calls[0][0].0, "system");
+        assert!(
+            !calls[0][0].1.contains("Recent Group Conversation"),
+            "DM system prompt must NOT contain group context, got: {}",
+            calls[0][0].1
+        );
     }
 }
