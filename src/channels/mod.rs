@@ -126,6 +126,34 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
+// ── Live channel registry (process-global) ───────────────────────
+// Allows the cron scheduler and heartbeat to reuse already-connected
+// channel instances (e.g. WhatsApp Web) instead of creating new ones.
+
+static LIVE_CHANNELS: OnceLock<Mutex<HashMap<String, Arc<dyn Channel>>>> = OnceLock::new();
+
+fn live_channels() -> &'static Mutex<HashMap<String, Arc<dyn Channel>>> {
+    LIVE_CHANNELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register connected channel instances for cross-component delivery.
+pub fn register_live_channels<S: ::std::hash::BuildHasher>(
+    channels: &HashMap<String, Arc<dyn Channel>, S>,
+) {
+    let mut map = live_channels().lock().unwrap_or_else(|e| e.into_inner());
+    map.clear();
+    for (name, ch) in channels {
+        map.insert(name.clone(), Arc::clone(ch));
+    }
+    tracing::info!(count = channels.len(), "Live channel registry populated");
+}
+
+/// Look up a connected channel by name.
+pub fn get_live_channel(name: &str) -> Option<Arc<dyn Channel>> {
+    let map = live_channels().lock().unwrap_or_else(|e| e.into_inner());
+    map.get(name).cloned()
+}
+
 /// Observer wrapper that forwards tool-call events to a channel sender
 /// for real-time threaded notifications.
 struct ChannelNotifyObserver {
@@ -4951,6 +4979,9 @@ pub async fn start_channels(config: Config) -> Result<()> {
             map.insert(name.clone(), Arc::clone(ch));
         }
     }
+
+    // Populate the live channel registry for cron/heartbeat delivery.
+    register_live_channels(channels_by_name.as_ref());
 
     let max_in_flight_messages = compute_max_in_flight_messages(channels.len());
 
