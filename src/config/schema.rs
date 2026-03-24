@@ -5915,6 +5915,13 @@ pub struct ChannelsConfig {
     /// Auto-archive stale sessions older than this many hours. `0` disables. Default: `0`.
     #[serde(default)]
     pub session_ttl_hours: u32,
+    /// How many minutes of recent group conversation to inject as context when
+    /// the agent is mentioned in a group. `0` disables. Default: `15`.
+    #[serde(default = "default_group_context_window_minutes")]
+    pub group_context_window_minutes: u64,
+    /// Maximum number of observe messages to inject as group context. Default: `30`.
+    #[serde(default = "default_group_context_max_messages")]
+    pub group_context_max_messages: usize,
 }
 
 impl ChannelsConfig {
@@ -6037,6 +6044,9 @@ fn default_channel_message_timeout_secs() -> u64 {
     300
 }
 
+fn default_group_context_window_minutes() -> u64 { 15 }
+fn default_group_context_max_messages() -> usize { 30 }
+
 fn default_session_backend() -> String {
     "sqlite".into()
 }
@@ -6081,6 +6091,8 @@ impl Default for ChannelsConfig {
             session_persistence: true,
             session_backend: default_session_backend(),
             session_ttl_hours: 0,
+            group_context_window_minutes: default_group_context_window_minutes(),
+            group_context_max_messages: default_group_context_max_messages(),
         }
     }
 }
