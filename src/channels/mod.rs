@@ -126,6 +126,34 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
+// ── Live channel registry (process-global) ───────────────────────
+// Allows the cron scheduler and heartbeat to reuse already-connected
+// channel instances (e.g. WhatsApp Web) instead of creating new ones.
+
+static LIVE_CHANNELS: OnceLock<Mutex<HashMap<String, Arc<dyn Channel>>>> = OnceLock::new();
+
+fn live_channels() -> &'static Mutex<HashMap<String, Arc<dyn Channel>>> {
+    LIVE_CHANNELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register connected channel instances for cross-component delivery.
+pub fn register_live_channels<S: ::std::hash::BuildHasher>(
+    channels: &HashMap<String, Arc<dyn Channel>, S>,
+) {
+    let mut map = live_channels().lock().unwrap_or_else(|e| e.into_inner());
+    map.clear();
+    for (name, ch) in channels {
+        map.insert(name.clone(), Arc::clone(ch));
+    }
+    tracing::info!(count = channels.len(), "Live channel registry populated");
+}
+
+/// Look up a connected channel by name.
+pub fn get_live_channel(name: &str) -> Option<Arc<dyn Channel>> {
+    let map = live_channels().lock().unwrap_or_else(|e| e.into_inner());
+    map.get(name).cloned()
+}
+
 /// Observer wrapper that forwards tool-call events to a channel sender
 /// for real-time threaded notifications.
 struct ChannelNotifyObserver {
@@ -380,6 +408,8 @@ struct ChannelRuntimeContext {
     ack_reactions: bool,
     show_tool_calls: bool,
     session_store: Option<Arc<session_store::SessionStore>>,
+    /// SQLite observe store — reads passive group observations for context injection.
+    observe_store: Option<Arc<session_sqlite::SqliteSessionBackend>>,
     /// Non-interactive approval manager for channel-driven runs.
     /// Enforces `auto_approve` / `always_ask` / supervised policy from
     /// `[autonomy]` config; auto-denies tools that would need interactive
@@ -667,6 +697,49 @@ fn build_channel_system_prompt(
     }
 
     prompt
+}
+
+/// Load recent group conversation from the observe store and format as a
+/// transcript section for system prompt injection.
+///
+/// Returns an empty string if no recent messages are found.
+fn load_group_context(
+    observe_store: &session_sqlite::SqliteSessionBackend,
+    group_jid: &str,
+    window_minutes: u64,
+    max_messages: usize,
+    max_chars: usize,
+) -> String {
+    use crate::channels::session_backend::SessionBackend;
+
+    let since = chrono::Utc::now() - chrono::Duration::minutes(window_minutes as i64);
+    let session_key = format!("observe_whatsapp_{group_jid}");
+    let messages = observe_store.load_since(&session_key, since);
+
+    if messages.is_empty() {
+        return String::new();
+    }
+
+    // Keep only the most recent max_messages
+    let messages: Vec<_> = if messages.len() > max_messages {
+        messages[messages.len() - max_messages..].to_vec()
+    } else {
+        messages
+    };
+
+    // Build transcript lines, truncating from the front if over char budget
+    let mut lines: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
+    let mut total_chars: usize = lines.iter().map(|l| l.len() + 1).sum(); // +1 for newline
+    while total_chars > max_chars && lines.len() > 1 {
+        total_chars -= lines[0].len() + 1;
+        lines.remove(0);
+    }
+
+    let header = "## Recent Group Conversation\n\n\
+        The following messages were sent recently in this group before you were mentioned. \
+        Use them as background context only. Do not respond to these messages directly.\n";
+
+    format!("{header}\n{}", lines.join("\n"))
 }
 
 fn normalize_cached_channel_turns(turns: Vec<ChatMessage>) -> Vec<ChatMessage> {
@@ -2558,6 +2631,32 @@ async fn process_channel_message(
         build_channel_system_prompt(&base_system_prompt, &msg.channel, &msg.reply_target);
     if !memory_context.is_empty() {
         let _ = write!(system_prompt, "\n\n{memory_context}");
+    }
+    // ── Group context injection ──────────────────────────────────
+    // For group mentions, inject recent non-mention messages from the
+    // observe store so the agent understands the conversation context.
+    if msg.reply_target.ends_with("@g.us") {
+        let window = ctx.prompt_config.channels_config.group_context_window_minutes;
+        let max_msgs = ctx.prompt_config.channels_config.group_context_max_messages;
+        if window > 0 {
+            if let Some(ref obs) = ctx.observe_store {
+                let group_context = load_group_context(
+                    obs,
+                    &msg.reply_target,
+                    window,
+                    max_msgs,
+                    2000,
+                );
+                if !group_context.is_empty() {
+                    tracing::info!(
+                        channel = %msg.channel,
+                        group_jid = %msg.reply_target,
+                        "Injecting group context into system prompt"
+                    );
+                    let _ = write!(system_prompt, "\n\n{group_context}");
+                }
+            }
+        }
     }
     let mut history = vec![ChatMessage::system(system_prompt)];
     history.extend(prior_turns);
@@ -4952,6 +5051,9 @@ pub async fn start_channels(config: Config) -> Result<()> {
         }
     }
 
+    // Populate the live channel registry for cron/heartbeat delivery.
+    register_live_channels(channels_by_name.as_ref());
+
     let max_in_flight_messages = compute_max_in_flight_messages(channels.len());
 
     println!("  🚦 In-flight message limit: {max_in_flight_messages}");
@@ -5049,6 +5151,20 @@ pub async fn start_channels(config: Config) -> Result<()> {
                 }
                 Err(e) => {
                     tracing::warn!("Session persistence disabled: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        },
+        observe_store: if config.channels_config.group_context_window_minutes > 0 {
+            match session_sqlite::SqliteSessionBackend::new(&config.workspace_dir) {
+                Ok(store) => {
+                    tracing::info!("Group context observe store enabled");
+                    Some(Arc::new(store))
+                }
+                Err(e) => {
+                    tracing::warn!("Group context observe store disabled: {e}");
                     None
                 }
             }
@@ -5436,6 +5552,7 @@ mod tests {
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -5555,6 +5672,7 @@ mod tests {
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -5630,6 +5748,7 @@ mod tests {
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -5724,6 +5843,7 @@ mod tests {
             ack_reactions: true,
             show_tool_calls: true,
             session_store: Some(Arc::clone(&store)),
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6268,6 +6388,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6353,6 +6474,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6452,6 +6574,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6536,6 +6659,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6630,6 +6754,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6745,6 +6870,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6841,6 +6967,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -6952,6 +7079,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7048,6 +7176,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7137,6 +7266,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7345,6 +7475,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7452,6 +7583,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7565,6 +7697,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             multimodal: crate::config::MultimodalConfig::default(),
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
@@ -7693,6 +7826,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7794,6 +7928,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -7878,6 +8013,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -8659,6 +8795,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -8795,6 +8932,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -8972,6 +9110,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -9084,6 +9223,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -9660,6 +9800,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -9751,6 +9892,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -9918,6 +10060,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -10033,6 +10176,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -10140,6 +10284,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -10267,6 +10412,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -10535,6 +10681,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
@@ -10607,5 +10754,318 @@ This is an example JSON object for profile settings."#;
         let result = sanitize_channel_response(clean_text, &tools);
 
         assert_eq!(result, clean_text);
+    }
+
+    #[test]
+    fn load_group_context_formats_recent_messages() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let now = chrono::Utc::now();
+        let recent = now - chrono::Duration::minutes(5);
+        {
+            let conn_guard = store.conn.lock();
+            for (i, msg) in ["[+111] Hello everyone", "[+222] Anyone know a plumber?", "[+333] Try Pedro"].iter().enumerate() {
+                let ts = (recent + chrono::Duration::seconds(i as i64 * 60)).to_rfc3339();
+                conn_guard.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, 'user', ?2, ?3)",
+                    rusqlite::params!["observe_whatsapp_group123@g.us", msg, ts],
+                ).unwrap();
+            }
+        }
+
+        let result = load_group_context(&store, "group123@g.us", 15, 30, 2000);
+        assert!(result.contains("Recent Group Conversation"));
+        assert!(result.contains("[+111] Hello everyone"));
+        assert!(result.contains("[+222] Anyone know a plumber?"));
+        assert!(result.contains("[+333] Try Pedro"));
+    }
+
+    #[test]
+    fn load_group_context_returns_empty_for_quiet_group() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let result = load_group_context(&store, "quiet_group@g.us", 15, 30, 2000);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn load_group_context_truncates_to_max_messages() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let now = chrono::Utc::now();
+        {
+            let conn_guard = store.conn.lock();
+            for i in 0..10 {
+                let ts = (now - chrono::Duration::seconds(10 - i)).to_rfc3339();
+                conn_guard.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, 'user', ?2, ?3)",
+                    rusqlite::params!["observe_whatsapp_busy@g.us", format!("[+{i}] msg {i}"), ts],
+                ).unwrap();
+            }
+        }
+
+        let result = load_group_context(&store, "busy@g.us", 15, 3, 2000);
+        // Should only contain last 3 messages (7, 8, 9)
+        assert!(result.contains("msg 7"));
+        assert!(result.contains("msg 8"));
+        assert!(result.contains("msg 9"));
+        assert!(!result.contains("msg 0"));
+    }
+
+    #[test]
+    fn load_group_context_truncates_to_max_chars() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let now = chrono::Utc::now();
+        {
+            let conn_guard = store.conn.lock();
+            for i in 0..5 {
+                let ts = (now - chrono::Duration::seconds(5 - i)).to_rfc3339();
+                let long_msg = format!("[+{i}] {}", "x".repeat(200));
+                conn_guard.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, 'user', ?2, ?3)",
+                    rusqlite::params!["observe_whatsapp_verbose@g.us", long_msg, ts],
+                ).unwrap();
+            }
+        }
+
+        // 300 chars budget — should truncate, keeping most recent messages
+        let result = load_group_context(&store, "verbose@g.us", 15, 30, 300);
+        assert!(result.contains("Recent Group Conversation"));
+        assert!(result.contains("[+4]")); // most recent kept
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_injects_group_context_for_mentions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let observe = Arc::new(
+            session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap(),
+        );
+
+        // Seed observe store with recent group messages
+        {
+            let now = chrono::Utc::now();
+            let conn = observe.conn.lock();
+            for (i, msg) in [
+                "[+111] Does anyone know a plumber?",
+                "[+222] Try Pedro at +34655444333",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let ts = (now - chrono::Duration::seconds(60 - i as i64 * 30)).to_rfc3339();
+                conn.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) \
+                     VALUES (?1, 'user', ?2, ?3)",
+                    rusqlite::params!["observe_whatsapp_testgroup@g.us", msg, ts],
+                )
+                .unwrap();
+            }
+        }
+
+        let channel_impl = Arc::new(RecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let provider_impl = Arc::new(HistoryCaptureProvider::default());
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: provider_impl.clone(),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            prompt_config: Arc::new(crate::config::Config::default()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: crate::config::MultimodalConfig::default(),
+            media_pipeline: crate::config::MediaPipelineConfig::default(),
+            transcription_config: crate::config::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(Vec::new()),
+            query_classification: crate::config::QueryClassificationConfig::default(),
+            ack_reactions: false,
+            show_tool_calls: true,
+            session_store: None,
+            observe_store: Some(observe.clone()),
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &crate::config::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: crate::config::PacingConfig::default(),
+        });
+
+        process_channel_message(
+            runtime_ctx.clone(),
+            traits::ChannelMessage {
+                id: "msg-group-1".to_string(),
+                sender: "+999".to_string(),
+                reply_target: "testgroup@g.us".to_string(),
+                content: "claw, who recommended a plumber?".to_string(),
+                channel: "test-channel".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        let calls = provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 1, "expected exactly one provider call");
+        // calls[0][0] is the system message
+        assert_eq!(calls[0][0].0, "system");
+        assert!(
+            calls[0][0].1.contains("Recent Group Conversation"),
+            "system prompt should contain group context header, got: {}",
+            calls[0][0].1
+        );
+        assert!(
+            calls[0][0].1.contains("plumber"),
+            "system prompt should contain seeded group messages, got: {}",
+            calls[0][0].1
+        );
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_skips_group_context_for_dms() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let observe = Arc::new(
+            session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap(),
+        );
+
+        // Seed observe store with messages under a DM-style key (no @g.us)
+        {
+            let now = chrono::Utc::now();
+            let conn = observe.conn.lock();
+            let ts = (now - chrono::Duration::seconds(30)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO sessions (session_key, role, content, created_at) \
+                 VALUES (?1, 'user', ?2, ?3)",
+                rusqlite::params!["observe_whatsapp_+12345678", "[+111] plumber info", ts],
+            )
+            .unwrap();
+        }
+
+        let channel_impl = Arc::new(RecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let provider_impl = Arc::new(HistoryCaptureProvider::default());
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: provider_impl.clone(),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            prompt_config: Arc::new(crate::config::Config::default()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: crate::config::MultimodalConfig::default(),
+            media_pipeline: crate::config::MediaPipelineConfig::default(),
+            transcription_config: crate::config::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(Vec::new()),
+            query_classification: crate::config::QueryClassificationConfig::default(),
+            ack_reactions: false,
+            show_tool_calls: true,
+            session_store: None,
+            observe_store: Some(observe.clone()),
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &crate::config::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: crate::config::PacingConfig::default(),
+        });
+
+        process_channel_message(
+            runtime_ctx.clone(),
+            traits::ChannelMessage {
+                id: "msg-dm-1".to_string(),
+                sender: "+12345678".to_string(),
+                reply_target: "+12345678".to_string(), // DM: no @g.us suffix
+                content: "who recommended a plumber?".to_string(),
+                channel: "test-channel".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        let calls = provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 1, "expected exactly one provider call");
+        assert_eq!(calls[0][0].0, "system");
+        assert!(
+            !calls[0][0].1.contains("Recent Group Conversation"),
+            "DM system prompt must NOT contain group context, got: {}",
+            calls[0][0].1
+        );
     }
 }

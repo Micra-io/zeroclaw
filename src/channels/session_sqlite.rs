@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 /// SQLite-backed session store with FTS5 and WAL mode.
 pub struct SqliteSessionBackend {
-    conn: Mutex<Connection>,
+    pub(crate) conn: Mutex<Connection>,
     #[allow(dead_code)]
     db_path: PathBuf,
 }
@@ -153,6 +153,31 @@ impl SessionBackend for SqliteSessionBackend {
         };
 
         let rows = match stmt.query_map(params![session_key], |row| {
+            Ok(ChatMessage {
+                role: row.get(0)?,
+                content: row.get(1)?,
+            })
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
+    fn load_since(&self, session_key: &str, since: DateTime<Utc>) -> Vec<ChatMessage> {
+        let conn = self.conn.lock();
+        let since_str = since.to_rfc3339();
+        let mut stmt = match conn.prepare(
+            "SELECT role, content FROM sessions \
+             WHERE session_key = ?1 AND created_at >= ?2 \
+             ORDER BY id ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let rows = match stmt.query_map(params![session_key, since_str], |row| {
             Ok(ChatMessage {
                 role: row.get(0)?,
                 content: row.get(1)?,
@@ -643,5 +668,49 @@ mod tests {
 
         let meta = backend.list_sessions_with_metadata();
         assert!(meta[0].name.is_none());
+    }
+
+    #[test]
+    fn load_since_returns_only_recent_messages() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+        let key = "observe_whatsapp_test_group";
+
+        // Insert an old message by directly manipulating created_at
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![key, "user", "[+111] old message", "2026-03-24T08:00:00+00:00"],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![key, "user", "[+222] recent message", "2026-03-24T09:50:00+00:00"],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![key, "user", "[+333] newest message", "2026-03-24T09:55:00+00:00"],
+            ).unwrap();
+        }
+
+        let since = chrono::DateTime::parse_from_rfc3339("2026-03-24T09:45:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let messages = store.load_since(key, since);
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content.contains("recent message"));
+        assert!(messages[1].content.contains("newest message"));
+    }
+
+    #[test]
+    fn load_since_returns_empty_when_no_matches() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+        let key = "observe_whatsapp_empty";
+
+        let since = chrono::Utc::now();
+        let messages = store.load_since(key, since);
+        assert!(messages.is_empty());
     }
 }

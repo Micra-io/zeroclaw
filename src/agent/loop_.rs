@@ -3804,6 +3804,7 @@ pub async fn run(
     interactive: bool,
     session_state_file: Option<PathBuf>,
     allowed_tools: Option<Vec<String>>,
+    no_memory: bool,
 ) -> Result<String> {
     // ── Wire up agnostic subsystems ──────────────────────────────
     let base_observer = observability::create_observer(&config.observability);
@@ -3814,6 +3815,13 @@ pub async fn run(
         &config.autonomy,
         &config.workspace_dir,
     ));
+
+    // ── Override memory backend when --no-memory is set ───────────
+    let mut config = config;
+    if no_memory {
+        config.memory.backend = "none".to_string();
+        tracing::info!("Memory disabled via --no-memory flag");
+    }
 
     // ── Memory (the brain) ────────────────────────────────────────
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage_and_routes(
