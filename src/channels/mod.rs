@@ -699,6 +699,49 @@ fn build_channel_system_prompt(
     prompt
 }
 
+/// Load recent group conversation from the observe store and format as a
+/// transcript section for system prompt injection.
+///
+/// Returns an empty string if no recent messages are found.
+fn load_group_context(
+    observe_store: &session_sqlite::SqliteSessionBackend,
+    group_jid: &str,
+    window_minutes: u64,
+    max_messages: usize,
+    max_chars: usize,
+) -> String {
+    use crate::channels::session_backend::SessionBackend;
+
+    let since = chrono::Utc::now() - chrono::Duration::minutes(window_minutes as i64);
+    let session_key = format!("observe_whatsapp_{group_jid}");
+    let messages = observe_store.load_since(&session_key, since);
+
+    if messages.is_empty() {
+        return String::new();
+    }
+
+    // Keep only the most recent max_messages
+    let messages: Vec<_> = if messages.len() > max_messages {
+        messages[messages.len() - max_messages..].to_vec()
+    } else {
+        messages
+    };
+
+    // Build transcript lines, truncating from the front if over char budget
+    let mut lines: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
+    let mut total_chars: usize = lines.iter().map(|l| l.len() + 1).sum(); // +1 for newline
+    while total_chars > max_chars && lines.len() > 1 {
+        total_chars -= lines[0].len() + 1;
+        lines.remove(0);
+    }
+
+    let header = "## Recent Group Conversation\n\n\
+        The following messages were sent recently in this group before you were mentioned. \
+        Use them as background context only. Do not respond to these messages directly.\n";
+
+    format!("{header}\n{}", lines.join("\n"))
+}
+
 fn normalize_cached_channel_turns(turns: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut normalized = Vec::with_capacity(turns.len());
     let mut expecting_user = true;
@@ -10685,5 +10728,88 @@ This is an example JSON object for profile settings."#;
         let result = sanitize_channel_response(clean_text, &tools);
 
         assert_eq!(result, clean_text);
+    }
+
+    #[test]
+    fn load_group_context_formats_recent_messages() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let now = chrono::Utc::now();
+        let recent = now - chrono::Duration::minutes(5);
+        {
+            let conn_guard = store.conn.lock();
+            for (i, msg) in ["[+111] Hello everyone", "[+222] Anyone know a plumber?", "[+333] Try Pedro"].iter().enumerate() {
+                let ts = (recent + chrono::Duration::seconds(i as i64 * 60)).to_rfc3339();
+                conn_guard.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, 'user', ?2, ?3)",
+                    rusqlite::params!["observe_whatsapp_group123@g.us", msg, ts],
+                ).unwrap();
+            }
+        }
+
+        let result = load_group_context(&store, "group123@g.us", 15, 30, 2000);
+        assert!(result.contains("Recent Group Conversation"));
+        assert!(result.contains("[+111] Hello everyone"));
+        assert!(result.contains("[+222] Anyone know a plumber?"));
+        assert!(result.contains("[+333] Try Pedro"));
+    }
+
+    #[test]
+    fn load_group_context_returns_empty_for_quiet_group() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let result = load_group_context(&store, "quiet_group@g.us", 15, 30, 2000);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn load_group_context_truncates_to_max_messages() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let now = chrono::Utc::now();
+        {
+            let conn_guard = store.conn.lock();
+            for i in 0..10 {
+                let ts = (now - chrono::Duration::seconds(10 - i)).to_rfc3339();
+                conn_guard.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, 'user', ?2, ?3)",
+                    rusqlite::params!["observe_whatsapp_busy@g.us", format!("[+{i}] msg {i}"), ts],
+                ).unwrap();
+            }
+        }
+
+        let result = load_group_context(&store, "busy@g.us", 15, 3, 2000);
+        // Should only contain last 3 messages (7, 8, 9)
+        assert!(result.contains("msg 7"));
+        assert!(result.contains("msg 8"));
+        assert!(result.contains("msg 9"));
+        assert!(!result.contains("msg 0"));
+    }
+
+    #[test]
+    fn load_group_context_truncates_to_max_chars() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let now = chrono::Utc::now();
+        {
+            let conn_guard = store.conn.lock();
+            for i in 0..5 {
+                let ts = (now - chrono::Duration::seconds(5 - i)).to_rfc3339();
+                let long_msg = format!("[+{i}] {}", "x".repeat(200));
+                conn_guard.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, 'user', ?2, ?3)",
+                    rusqlite::params!["observe_whatsapp_verbose@g.us", long_msg, ts],
+                ).unwrap();
+            }
+        }
+
+        // 300 chars budget — should truncate, keeping most recent messages
+        let result = load_group_context(&store, "verbose@g.us", 15, 30, 300);
+        assert!(result.contains("Recent Group Conversation"));
+        assert!(result.contains("[+4]")); // most recent kept
     }
 }

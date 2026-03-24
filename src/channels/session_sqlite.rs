@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 /// SQLite-backed session store with FTS5 and WAL mode.
 pub struct SqliteSessionBackend {
-    conn: Mutex<Connection>,
+    pub(crate) conn: Mutex<Connection>,
     #[allow(dead_code)]
     db_path: PathBuf,
 }

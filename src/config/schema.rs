@@ -10949,6 +10949,8 @@ default_temperature = 0.7
                 session_persistence: true,
                 session_backend: default_session_backend(),
                 session_ttl_hours: 0,
+                group_context_window_minutes: 15,
+                group_context_max_messages: 30,
             },
             memory: MemoryConfig::default(),
             storage: StorageConfig::default(),
@@ -11952,6 +11954,8 @@ allowed_users = ["@ops:matrix.org"]
             session_persistence: true,
             session_backend: default_session_backend(),
             session_ttl_hours: 0,
+            group_context_window_minutes: 15,
+            group_context_max_messages: 30,
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
         let parsed: ChannelsConfig = toml::from_str(&toml_str).unwrap();
@@ -12293,6 +12297,8 @@ channel_id = "C123"
             session_persistence: true,
             session_backend: default_session_backend(),
             session_ttl_hours: 0,
+            group_context_window_minutes: 15,
+            group_context_max_messages: 30,
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
         let parsed: ChannelsConfig = toml::from_str(&toml_str).unwrap();
