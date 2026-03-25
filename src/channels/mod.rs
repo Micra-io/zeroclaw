@@ -14,6 +14,7 @@
 //! To add a new channel, implement [`Channel`] in a new submodule and wire it into
 //! [`start_channels`]. See `AGENTS.md` §7.2 for the full change playbook.
 
+pub mod acp_server;
 pub mod bluesky;
 pub mod clawdtalk;
 pub mod cli;
@@ -49,6 +50,7 @@ pub mod traits;
 pub mod transcription;
 pub mod tts;
 pub mod twitter;
+pub mod voice_call;
 #[cfg(feature = "voice-wake")]
 pub mod voice_wake;
 pub mod wati;
@@ -90,6 +92,8 @@ pub use traits::{Channel, SendMessage};
 #[allow(unused_imports)]
 pub use tts::{TtsManager, TtsProvider};
 pub use twitter::TwitterChannel;
+#[allow(unused_imports)]
+pub use voice_call::{VoiceCallChannel, VoiceCallConfig};
 #[cfg(feature = "voice-wake")]
 pub use voice_wake::VoiceWakeChannel;
 pub use wati::WatiChannel;
@@ -1964,8 +1968,9 @@ fn sanitize_channel_response(response: &str, tools: &[Box<dyn Tool>]) -> String 
         .map(|tool| tool.name().to_ascii_lowercase())
         .collect();
     // Strip any [Used tools: ...] prefix that the LLM may have echoed from
-    // history context (#4400).
-    let stripped_summary = strip_tool_summary_prefix(response);
+    // history context (#4400). Trim first to handle leading/trailing whitespace.
+    let trimmed_response = response.trim();
+    let stripped_summary = strip_tool_summary_prefix(trimmed_response);
     // Strip XML-style tool-call tags (e.g. <tool_call>...</tool_call>)
     let stripped_xml = strip_tool_call_tags(&stripped_summary);
     // Strip isolated tool-call JSON artifacts
@@ -2673,7 +2678,7 @@ async fn process_channel_message(
     );
 
     let (delta_tx, delta_rx) = if use_streaming {
-        let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::DraftEvent>(64);
         (Some(tx), Some(rx))
     } else {
         (None, None)
@@ -2709,18 +2714,30 @@ async fn process_channel_message(
         let reply_target = msg.reply_target.clone();
         let draft_id = draft_id_ref.to_string();
         Some(tokio::spawn(async move {
+            use crate::agent::loop_::DraftEvent;
             let mut accumulated = String::new();
-            while let Some(delta) = rx.recv().await {
-                if delta == crate::agent::loop_::DRAFT_CLEAR_SENTINEL {
-                    accumulated.clear();
-                    continue;
-                }
-                accumulated.push_str(&delta);
-                if let Err(e) = channel
-                    .update_draft(&reply_target, &draft_id, &accumulated)
-                    .await
-                {
-                    tracing::debug!("Draft update failed: {e}");
+            while let Some(event) = rx.recv().await {
+                match event {
+                    DraftEvent::Clear => {
+                        accumulated.clear();
+                    }
+                    DraftEvent::Progress(text) => {
+                        if let Err(e) = channel
+                            .update_draft_progress(&reply_target, &draft_id, &text)
+                            .await
+                        {
+                            tracing::debug!("Draft progress update failed: {e}");
+                        }
+                    }
+                    DraftEvent::Content(text) => {
+                        accumulated.push_str(&text);
+                        if let Err(e) = channel
+                            .update_draft(&reply_target, &draft_id, &accumulated)
+                            .await
+                        {
+                            tracing::debug!("Draft update failed: {e}");
+                        }
+                    }
                 }
             }
         }))
@@ -2888,6 +2905,8 @@ async fn process_channel_message(
         break loop_result;
     };
 
+    // Drop the delta sender so the draft updater task can finish
+    // (rx.recv() returns None only when all senders are dropped).
     tracing::debug!("Post-loop: dropping delta_tx and awaiting draft updater");
     drop(delta_tx);
     if let Some(handle) = draft_updater {
@@ -2966,6 +2985,11 @@ async fn process_channel_message(
                 {
                     crate::hooks::HookResult::Cancel(reason) => {
                         tracing::info!(%reason, "outgoing message suppressed by hook");
+                        if let (Some(channel), Some(draft_id)) =
+                            (target_channel.as_ref(), draft_message_id.as_deref())
+                        {
+                            let _ = channel.cancel_draft(&msg.reply_target, draft_id).await;
+                        }
                         return;
                     }
                     crate::hooks::HookResult::Continue((
@@ -4063,7 +4087,9 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
                     sl.allowed_users.clone(),
                 )
                 .with_workspace_dir(config.workspace_dir.clone())
-                .with_transcription(config.transcription.clone()),
+                .with_markdown_blocks(sl.use_markdown_blocks)
+                .with_transcription(config.transcription.clone())
+                .with_streaming(sl.stream_drafts, sl.draft_update_interval_ms),
             ))
         }
         other => anyhow::bail!("Unknown channel '{other}'. Supported: telegram, discord, slack"),
@@ -4194,8 +4220,10 @@ fn collect_configured_channels(
                 .with_thread_replies(sl.thread_replies.unwrap_or(true))
                 .with_group_reply_policy(sl.mention_only, Vec::new())
                 .with_workspace_dir(config.workspace_dir.clone())
+                .with_markdown_blocks(sl.use_markdown_blocks)
                 .with_proxy_url(sl.proxy_url.clone())
-                .with_transcription(config.transcription.clone()),
+                .with_transcription(config.transcription.clone())
+                .with_streaming(sl.stream_drafts, sl.draft_update_interval_ms),
             ),
         });
     }
@@ -4239,6 +4267,11 @@ fn collect_configured_channels(
                     mx.user_id.clone(),
                     mx.device_id.clone(),
                     config.config_path.parent().map(|path| path.to_path_buf()),
+                )
+                .with_streaming(
+                    mx.stream_mode,
+                    mx.draft_update_interval_ms,
+                    mx.multi_message_delay_ms,
                 )
                 .with_transcription(config.transcription.clone()),
             ),
@@ -4680,6 +4713,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         provider_timeout_secs: Some(config.provider_timeout_secs),
         extra_headers: config.extra_headers.clone(),
         api_path: config.api_path.clone(),
+        provider_max_tokens: config.provider_max_tokens,
     };
     let provider: Arc<dyn Provider> = Arc::from(
         create_resilient_provider_nonblocking(
@@ -5421,6 +5455,18 @@ mod tests {
             strip_tool_summary_prefix(input),
             "The command output is 42."
         );
+    }
+
+    #[test]
+    fn sanitize_channel_response_strips_used_tools_with_leading_whitespace() {
+        let tools: Vec<Box<dyn Tool>> = Vec::new();
+        // Issue #4478: response with leading whitespace before [Used tools: ...]
+        let input = "  [Used tools: web_search_tool]\nHere is the search result.";
+
+        let result = sanitize_channel_response(input, &tools);
+
+        assert!(!result.contains("[Used tools:"));
+        assert!(result.contains("Here is the search result."));
     }
 
     #[test]
