@@ -30,11 +30,12 @@ use super::session_backend::SessionBackend;
 use super::session_sqlite::SqliteSessionBackend;
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use super::whatsapp_storage::RusqliteStore;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use tokio::select;
+use wa_rs_proto::whatsapp::device_props::PlatformType;
 
 /// WhatsApp Web channel using wa-rs with custom rusqlite storage
 ///
@@ -95,6 +96,12 @@ pub struct WhatsAppWebChannel {
     /// Passive observer store — writes all group messages (including non-mention)
     /// to sessions.db for downstream scanner consumption.
     observe_store: Option<Arc<SqliteSessionBackend>>,
+    /// Compiled mention patterns for DM mention gating.
+    dm_mention_patterns: Arc<Vec<regex::Regex>>,
+    /// Compiled mention patterns for group-chat mention gating.
+    /// When non-empty, only group messages matching at least one pattern are
+    /// processed; matched fragments are stripped from the forwarded content.
+    group_mention_patterns: Arc<Vec<regex::Regex>>,
 }
 
 impl WhatsAppWebChannel {
@@ -158,6 +165,8 @@ impl WhatsAppWebChannel {
             pending_voice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             voice_chats: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             observe_store,
+            dm_mention_patterns: Arc::new(Vec::new()),
+            group_mention_patterns: Arc::new(Vec::new()),
         }
     }
 
@@ -187,6 +196,28 @@ impl WhatsAppWebChannel {
         if config.enabled {
             self.tts_config = Some(config);
         }
+        self
+    }
+
+    /// Set mention patterns for DM mention gating.
+    /// Each pattern string is compiled as a case-insensitive regex.
+    /// Invalid patterns are logged and skipped.
+    #[cfg(feature = "whatsapp-web")]
+    pub fn with_dm_mention_patterns(mut self, patterns: Vec<String>) -> Self {
+        self.dm_mention_patterns = Arc::new(
+            super::whatsapp::WhatsAppChannel::compile_mention_patterns(&patterns),
+        );
+        self
+    }
+
+    /// Set mention patterns for group-chat mention gating.
+    /// Each pattern string is compiled as a case-insensitive regex.
+    /// Invalid patterns are logged and skipped.
+    #[cfg(feature = "whatsapp-web")]
+    pub fn with_group_mention_patterns(mut self, patterns: Vec<String>) -> Self {
+        self.group_mention_patterns = Arc::new(
+            super::whatsapp::WhatsAppChannel::compile_mention_patterns(&patterns),
+        );
         self
     }
 
@@ -730,11 +761,18 @@ impl Channel for WhatsAppWebChannel {
             let mention_only = self.mention_only;
             let mention_name = self.mention_name.clone();
             let observe_store = self.observe_store.clone();
+            let wa_dm_mention_patterns = self.dm_mention_patterns.clone();
+            let wa_group_mention_patterns = self.group_mention_patterns.clone();
 
             let mut builder = Bot::builder()
                 .with_backend(backend)
                 .with_transport_factory(transport_factory)
                 .with_http_client(http_client)
+                .with_device_props(
+                    Some("ZeroClaw".to_string()),
+                    None,
+                    Some(PlatformType::Desktop),
+                )
                 .on_event(move |event, client| {
                     let tx_inner = tx_clone.clone();
                     let allowed_numbers = allowed_numbers.clone();
@@ -751,6 +789,8 @@ impl Channel for WhatsAppWebChannel {
                     let mention_only = mention_only;
                     let mention_name = mention_name.clone();
                     let observe_store = observe_store.clone();
+                    let wa_dm_mention_patterns = wa_dm_mention_patterns.clone();
+                    let wa_group_mention_patterns = wa_group_mention_patterns.clone();
                     async move {
                         match event {
                             Event::Message(msg, info) => {
@@ -770,26 +810,17 @@ impl Channel for WhatsAppWebChannel {
                                     mapped_phone.as_deref(),
                                 );
 
-                                let normalized = match sender_candidates
+                                let normalized = sender_candidates
                                     .iter()
                                     .find(|candidate| {
                                         Self::is_number_allowed_for_list(&allowed_numbers, candidate)
                                     })
-                                    .cloned()
-                                {
-                                    Some(n) => n,
-                                    None => {
-                                        tracing::warn!(
-                                            "WhatsApp Web: message from unrecognized sender not in allowed list (candidates_count={})",
-                                            sender_candidates.len()
-                                        );
-                                        return;
-                                    }
-                                };
+                                    .cloned();
+
+                                let is_group = info.source.is_group;
 
                                 // ── Personal-mode chat-type policy filtering ──
                                 if wa_mode == crate::config::WhatsAppWebMode::Personal {
-                                    let is_group = chat.contains("@g.us");
                                     // Self-chat: the chat JID user part matches
                                     // the sender's user part (message to "Notes
                                     // to Self").
@@ -798,7 +829,7 @@ impl Channel for WhatsAppWebChannel {
                                         .split_once('@')
                                         .map(|(u, _)| u)
                                         .unwrap_or(&chat);
-                                    let is_self_chat = !is_group && sender_user == chat_user;
+                                    let is_self_chat = !is_group && sender_user == chat_user && info.source.is_from_me;
 
                                     if is_self_chat {
                                         if !wa_self_chat_mode {
@@ -820,7 +851,13 @@ impl Channel for WhatsAppWebChannel {
                                                 // allow unconditionally
                                             }
                                             crate::config::WhatsAppChatPolicy::Allowlist => {
-                                                // already filtered by allowed_numbers above
+                                                if normalized.is_none() {
+                                                    tracing::warn!(
+                                                        "WhatsApp Web: message from unrecognized sender not in allowed list (candidates_count={})",
+                                                        sender_candidates.len()
+                                                    );
+                                                    return;
+                                                }
                                             }
                                         }
                                     } else {
@@ -836,7 +873,13 @@ impl Channel for WhatsAppWebChannel {
                                                 // allow unconditionally
                                             }
                                             crate::config::WhatsAppChatPolicy::Allowlist => {
-                                                // already filtered by allowed_numbers above
+                                                if normalized.is_none() {
+                                                    tracing::warn!(
+                                                        "WhatsApp Web: message from unrecognized sender not in allowed list (candidates_count={})",
+                                                        sender_candidates.len()
+                                                    );
+                                                    return;
+                                                }
                                             }
                                         }
                                     }
@@ -846,14 +889,13 @@ impl Channel for WhatsAppWebChannel {
                                 if !Self::is_chat_allowed(&chat, &sender, &allowed_groups) {
                                     tracing::debug!(
                                         "WhatsApp Web: chat {} not in allowed_groups, ignoring message from {}",
-                                        chat, normalized
+                                        chat, normalized.as_deref().unwrap_or(&sender)
                                     );
                                     return;
                                 }
 
                                 // Mention-only filter: skip group messages that don't mention the bot.
                                 // Contact shares bypass this filter.
-                                let is_group = chat.ends_with("@g.us");
                                 let is_contact = msg.contact_message.is_some()
                                     || msg.contacts_array_message.is_some();
                                 if mention_only && is_group && !is_contact {
@@ -868,7 +910,7 @@ impl Channel for WhatsAppWebChannel {
                                             let text = msg.text_content().unwrap_or("").to_string();
                                             if !text.is_empty() {
                                                 let session_key = format!("observe_whatsapp_{}", chat);
-                                                let formatted = format!("[{}] {}", normalized, text);
+                                                let formatted = format!("[{}] {}", normalized.as_deref().unwrap_or(&sender), text);
                                                 let turn = crate::providers::traits::ChatMessage {
                                                     role: "user".to_string(),
                                                     content: formatted,
@@ -880,11 +922,13 @@ impl Channel for WhatsAppWebChannel {
                                         }
                                         tracing::debug!(
                                             "WhatsApp Web: mention_only=true, no mention found in group message from {}, skipping",
-                                            normalized
+                                            normalized.as_deref().unwrap_or(&sender)
                                         );
                                         return;
                                     }
                                 }
+
+                                let normalized = normalized.unwrap_or_else(|| sender.clone());
 
                                 // Attempt voice note transcription (ptt = push-to-talk = voice note).
                                 // When `transcribe_non_ptt_audio` is enabled in the transcription
@@ -998,6 +1042,28 @@ impl Channel for WhatsAppWebChannel {
                                         }
                                     }
                                 }
+
+                                // ── Mention-pattern gating ──
+                                // Apply dm_mention_patterns for DMs and
+                                // group_mention_patterns for group chats.
+                                // When the applicable pattern set is non-empty,
+                                // messages without a match are dropped and
+                                // matched fragments are stripped.
+                                let content =
+                                    match super::whatsapp::WhatsAppChannel::apply_mention_gating(
+                                        &wa_dm_mention_patterns,
+                                        &wa_group_mention_patterns,
+                                        &content,
+                                        is_group,
+                                    ) {
+                                        Some(c) => c,
+                                        None => {
+                                            tracing::debug!(
+                                                "WhatsApp Web: message from {normalized} did not match mention patterns, dropping"
+                                            );
+                                            return;
+                                        }
+                                    };
 
                                 if let Err(e) = tx_inner
                                     .send(ChannelMessage {
