@@ -6399,6 +6399,11 @@ pub struct TelegramConfig {
     /// Overrides the global `[proxy]` setting for this channel only.
     #[serde(default)]
     pub proxy_url: Option<String>,
+    /// Allowed chat IDs or keywords. Empty = allow all (no filtering).
+    /// Keywords: "dm" (private chats), "group" (groups + supergroups), "*" (all).
+    /// Numeric chat IDs for explicit matches (e.g. "-1001234567890").
+    #[serde(default)]
+    pub allowed_chats: Vec<String>,
 }
 
 impl ChannelConfig for TelegramConfig {

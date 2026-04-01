@@ -3842,6 +3842,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     mention_only: false,
                     ack_reactions: None,
                     proxy_url: None,
+                    allowed_chats: vec![],
                 });
             }
             ChannelMenuChoice::Discord => {
