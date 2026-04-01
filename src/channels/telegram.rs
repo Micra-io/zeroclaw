@@ -1094,11 +1094,22 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             return None;
         }
 
+        let chat_type = message
+            .get("chat")
+            .and_then(|c| c.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         let chat_id = message
             .get("chat")
             .and_then(|chat| chat.get("id"))
             .and_then(serde_json::Value::as_i64)
             .map(|id| id.to_string())?;
+        if !Self::is_chat_allowed(&chat_id, chat_type, &self.allowed_chats) {
+            tracing::debug!(
+                "Telegram: ignoring attachment in chat {chat_id} (type={chat_type}): not in allowed_chats"
+            );
+            return None;
+        }
 
         let message_id = message
             .get("message_id")
@@ -1229,11 +1240,22 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             return None;
         }
 
+        let chat_type = message
+            .get("chat")
+            .and_then(|c| c.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         let chat_id = message
             .get("chat")
             .and_then(|chat| chat.get("id"))
             .and_then(serde_json::Value::as_i64)
             .map(|id| id.to_string())?;
+        if !Self::is_chat_allowed(&chat_id, chat_type, &self.allowed_chats) {
+            tracing::debug!(
+                "Telegram: ignoring voice in chat {chat_id} (type={chat_type}): not in allowed_chats"
+            );
+            return None;
+        }
 
         let message_id = message
             .get("message_id")
@@ -1457,6 +1479,23 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             return None;
         }
 
+        let chat_id = message
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(serde_json::Value::as_i64)
+            .map(|id| id.to_string())?;
+        let chat_type = message
+            .get("chat")
+            .and_then(|c| c.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if !Self::is_chat_allowed(&chat_id, chat_type, &self.allowed_chats) {
+            tracing::debug!(
+                "Telegram: ignoring message in chat {chat_id} (type={chat_type}): not in allowed_chats"
+            );
+            return None;
+        }
+
         let is_group = Self::is_group_message(message);
         if self.mention_only && is_group {
             let bot_username = self.bot_username.lock();
@@ -1468,12 +1507,6 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                 return None;
             }
         }
-
-        let chat_id = message
-            .get("chat")
-            .and_then(|chat| chat.get("id"))
-            .and_then(serde_json::Value::as_i64)
-            .map(|id| id.to_string())?;
 
         let message_id = message
             .get("message_id")
@@ -5167,5 +5200,62 @@ mod tests {
         assert!(TelegramChannel::is_chat_allowed("-100999", "group", &chats));
         assert!(TelegramChannel::is_chat_allowed("456", "private", &chats));
         assert!(!TelegramChannel::is_chat_allowed("789", "private", &chats));
+    }
+
+    #[test]
+    fn parse_update_message_rejects_disallowed_chat() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            vec!["*".into()],
+            false,
+            vec!["group".to_string()],
+        );
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 1,
+                "text": "hello",
+                "from": { "id": 1, "username": "alice" },
+                "chat": { "id": 123, "type": "private" }
+            }
+        });
+        assert!(ch.parse_update_message(&update).is_none());
+    }
+
+    #[test]
+    fn parse_update_message_accepts_allowed_chat() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            vec!["*".into()],
+            false,
+            vec!["group".to_string()],
+        );
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 1,
+                "text": "hello",
+                "from": { "id": 1, "username": "alice" },
+                "chat": { "id": -100999, "type": "supergroup" }
+            }
+        });
+        assert!(ch.parse_update_message(&update).is_some());
+    }
+
+    #[test]
+    fn parse_update_message_accepts_explicit_chat_id() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            vec!["*".into()],
+            false,
+            vec!["-100999".to_string()],
+        );
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 1,
+                "text": "hello",
+                "from": { "id": 1, "username": "alice" },
+                "chat": { "id": -100999, "type": "supergroup" }
+            }
+        });
+        assert!(ch.parse_update_message(&update).is_some());
     }
 }
