@@ -6402,6 +6402,7 @@ pub struct TelegramConfig {
     /// Allowed chat IDs or keywords. Empty = allow all (no filtering).
     /// Keywords: "dm" (private chats), "group" (groups + supergroups), "*" (all).
     /// Numeric chat IDs for explicit matches (e.g. "-1001234567890").
+    /// Telegram "channel" type chats have no keyword — use explicit ID or "*".
     #[serde(default)]
     pub allowed_chats: Vec<String>,
 }

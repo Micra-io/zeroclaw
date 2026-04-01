@@ -779,6 +779,9 @@ impl TelegramChannel {
     /// - `"dm"` — allow private chats
     /// - `"group"` — allow groups and supergroups
     /// - numeric chat ID — exact match
+    ///
+    /// Note: Telegram "channel" type chats have no keyword; allow them by
+    /// explicit chat ID or `"*"`.
     fn is_chat_allowed(chat_id: &str, chat_type: &str, allowed_chats: &[String]) -> bool {
         if allowed_chats.is_empty() {
             return true;
