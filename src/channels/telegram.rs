@@ -365,6 +365,18 @@ impl TelegramChannel {
             None
         };
 
+        let allowed_chats: Vec<String> =
+            allowed_chats.into_iter().map(|s| s.to_lowercase()).collect();
+        for entry in &allowed_chats {
+            match entry.as_str() {
+                "*" | "dm" | "group" => {}
+                id if id.parse::<i64>().is_ok() => {}
+                other => tracing::warn!(
+                    "Telegram allowed_chats: unrecognized entry '{other}' — expected 'dm', 'group', '*', or a numeric chat ID"
+                ),
+            }
+        }
+
         Self {
             bot_token,
             allowed_users: Arc::new(RwLock::new(normalized_allowed)),
@@ -789,12 +801,23 @@ impl TelegramChannel {
         let is_dm = chat_type == "private";
         let is_group = chat_type == "group" || chat_type == "supergroup";
 
-        allowed_chats.iter().any(|entry| match entry.as_str() {
+        let allowed = allowed_chats.iter().any(|entry| match entry.as_str() {
             "*" => true,
             "dm" => is_dm,
             "group" => is_group,
             id => id == chat_id,
-        })
+        });
+        if !allowed
+            && !is_dm
+            && !is_group
+            && chat_type != "channel"
+            && !chat_type.is_empty()
+        {
+            tracing::warn!(
+                "Telegram: unknown chat type '{chat_type}' for chat {chat_id} — not matched by any allowed_chats keyword"
+            );
+        }
+        allowed
     }
 
     fn is_user_allowed(&self, username: &str) -> bool {
@@ -5203,6 +5226,30 @@ mod tests {
         assert!(TelegramChannel::is_chat_allowed("-100999", "group", &chats));
         assert!(TelegramChannel::is_chat_allowed("456", "private", &chats));
         assert!(!TelegramChannel::is_chat_allowed("789", "private", &chats));
+    }
+
+    #[test]
+    fn is_chat_allowed_channel_type_needs_explicit_id_or_star() {
+        let keywords_only = vec!["dm".to_string(), "group".to_string()];
+        assert!(!TelegramChannel::is_chat_allowed("-100123", "channel", &keywords_only));
+
+        let with_star = vec!["*".to_string()];
+        assert!(TelegramChannel::is_chat_allowed("-100123", "channel", &with_star));
+
+        let with_id = vec!["-100123".to_string()];
+        assert!(TelegramChannel::is_chat_allowed("-100123", "channel", &with_id));
+    }
+
+    #[test]
+    fn is_chat_allowed_keywords_are_case_insensitive() {
+        // Constructor normalizes to lowercase, so simulate that
+        let chats: Vec<String> = vec!["DM".to_string(), "Group".to_string()]
+            .into_iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        assert!(TelegramChannel::is_chat_allowed("123", "private", &chats));
+        assert!(TelegramChannel::is_chat_allowed("-100999", "group", &chats));
+        assert!(TelegramChannel::is_chat_allowed("-100999", "supergroup", &chats));
     }
 
     #[test]
