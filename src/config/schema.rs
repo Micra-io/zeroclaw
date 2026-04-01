@@ -11396,6 +11396,7 @@ auto_save = true
                     mention_only: false,
                     ack_reactions: None,
                     proxy_url: None,
+                    allowed_chats: vec![],
                 }),
                 discord: None,
                 discord_history: None,
@@ -12211,6 +12212,7 @@ default_temperature = 0.7
             mention_only: false,
             ack_reactions: None,
             proxy_url: None,
+            allowed_chats: vec![],
         };
         let json = serde_json::to_string(&tc).unwrap();
         let parsed: TelegramConfig = serde_json::from_str(&json).unwrap();
@@ -15098,6 +15100,7 @@ require_otp_to_resume = true
             mention_only: false,
             ack_reactions: None,
             proxy_url: None,
+            allowed_chats: vec![],
         });
 
         // Save (triggers encryption)

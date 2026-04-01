@@ -11241,6 +11241,7 @@ This is an example JSON object for profile settings."#;
             mention_only: false,
             ack_reactions: None,
             proxy_url: None,
+            allowed_chats: vec![],
         });
         match build_channel_by_id(&config, "telegram") {
             Ok(channel) => assert_eq!(channel.name(), "telegram"),
