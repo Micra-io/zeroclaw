@@ -367,33 +367,35 @@ impl TelegramChannel {
             None
         };
 
-        let allowed_chats: Vec<String> =
+        let mut allowed_chats: Vec<String> =
             allowed_chats.into_iter().map(|s| s.to_lowercase()).collect();
-        for entry in &allowed_chats {
-            match entry.as_str() {
-                "*" | "dm" | "group" => {}
-                id if id.parse::<i64>().is_ok() => {}
-                other => tracing::warn!(
-                    "Telegram allowed_chats: unrecognized entry '{other}' — expected 'dm', 'group', '*', or a numeric chat ID"
-                ),
+        allowed_chats.retain(|entry| match entry.as_str() {
+            "*" | "dm" | "group" => true,
+            id if id.parse::<i64>().is_ok() => true,
+            other => {
+                tracing::warn!(
+                    "Telegram allowed_chats: dropping unrecognized entry '{other}' — expected 'dm', 'group', '*', or a numeric chat ID"
+                );
+                false
             }
-        }
+        });
 
-        let allowed_dm_users: Vec<String> = allowed_dm_users
+        let mut allowed_dm_users: Vec<String> = allowed_dm_users
             .into_iter()
-            .map(|s| Self::normalize_identity(&s))
+            .map(|s| Self::normalize_identity(&s).to_lowercase())
             .filter(|s| !s.is_empty())
             .collect();
-        for entry in &allowed_dm_users {
-            match entry.as_str() {
-                "*" => {}
-                id if id.parse::<i64>().is_ok() => {}
-                name if name.chars().all(|c| c.is_alphanumeric() || c == '_') => {}
-                other => tracing::warn!(
-                    "Telegram allowed_dm_users: suspicious entry '{other}' — expected a username, numeric ID, or '*'"
-                ),
+        allowed_dm_users.retain(|entry| match entry.as_str() {
+            "*" => true,
+            id if id.parse::<i64>().is_ok() => true,
+            name if name.chars().all(|c| c.is_alphanumeric() || c == '_') => true,
+            other => {
+                tracing::warn!(
+                    "Telegram allowed_dm_users: dropping invalid entry '{other}' — expected a username, numeric ID, or '*'"
+                );
+                false
             }
-        }
+        });
 
         Self {
             bot_token,
@@ -843,7 +845,7 @@ impl TelegramChannel {
     ///
     /// - empty slice — allow all (no restriction)
     /// - `"*"` — allow all DMs
-    /// - username or numeric ID — exact match
+    /// - username or numeric ID — case-insensitive match
     ///
     /// Non-DM chats (groups, supergroups, channels) always pass.
     fn is_dm_user_allowed(identities: &[&str], chat_type: &str, allowed_dm_users: &[String]) -> bool {
@@ -854,7 +856,10 @@ impl TelegramChannel {
             return true;
         }
         allowed_dm_users.iter().any(|entry| {
-            entry == "*" || identities.iter().any(|id| *id == entry.as_str())
+            entry == "*"
+                || identities
+                    .iter()
+                    .any(|id| id.eq_ignore_ascii_case(entry.as_str()))
         })
     }
 
@@ -5348,6 +5353,58 @@ mod tests {
         assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "private", &users));
         assert!(TelegramChannel::is_dm_user_allowed(&["unknown", "2852312"], "private", &users));
         assert!(!TelegramChannel::is_dm_user_allowed(&["bob", "999"], "private", &users));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_case_insensitive() {
+        // Constructor lowercases entries, so simulate that
+        let users = vec!["alice".to_string()]; // would be "Alice" in config, lowered by constructor
+        assert!(TelegramChannel::is_dm_user_allowed(&["Alice"], "private", &users));
+        assert!(TelegramChannel::is_dm_user_allowed(&["ALICE"], "private", &users));
+        assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "private", &users));
+        assert!(!TelegramChannel::is_dm_user_allowed(&["bob"], "private", &users));
+    }
+
+    #[test]
+    fn constructor_lowercases_allowed_dm_users() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            vec!["*".into()],
+            false,
+            vec![],
+            vec!["AlexandMe".to_string(), "@BOB".to_string()],
+        );
+        assert!(ch.allowed_dm_users.iter().all(|u| u == &u.to_lowercase()));
+    }
+
+    #[test]
+    fn constructor_drops_invalid_allowed_chats() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            vec!["*".into()],
+            false,
+            vec!["group".to_string(), "groups".to_string(), "dm".to_string(), "bogus".to_string(), "-100123".to_string()],
+            vec![],
+        );
+        // "groups" and "bogus" should be dropped; "group", "dm", "-100123" kept
+        assert_eq!(ch.allowed_chats, vec!["group", "dm", "-100123"]);
+    }
+
+    #[test]
+    fn constructor_drops_invalid_allowed_dm_users() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            vec!["*".into()],
+            false,
+            vec![],
+            vec!["alice".to_string(), "has spaces".to_string(), "*".to_string(), "123".to_string()],
+        );
+        // "has spaces" gets normalized (trim) but still contains a space → dropped
+        // "has" won't be there because normalize_identity doesn't split; the space makes it invalid
+        assert!(ch.allowed_dm_users.contains(&"alice".to_string()));
+        assert!(ch.allowed_dm_users.contains(&"*".to_string()));
+        assert!(ch.allowed_dm_users.contains(&"123".to_string()));
+        assert!(!ch.allowed_dm_users.iter().any(|u| u.contains(' ')));
     }
 
     #[test]
