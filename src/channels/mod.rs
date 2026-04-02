@@ -4324,6 +4324,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
                     tg.allowed_users.clone(),
                     tg.mention_only,
                     tg.allowed_chats.clone(),
+                    tg.allowed_dm_users.clone(),
                 )
                 .with_ack_reactions(ack)
                 .with_streaming(tg.stream_mode, tg.draft_update_interval_ms)
@@ -4534,6 +4535,7 @@ fn collect_configured_channels(
                     tg.allowed_users.clone(),
                     tg.mention_only,
                     tg.allowed_chats.clone(),
+                    tg.allowed_dm_users.clone(),
                 )
                 .with_ack_reactions(ack)
                 .with_streaming(tg.stream_mode, tg.draft_update_interval_ms)

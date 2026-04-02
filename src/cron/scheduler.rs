@@ -489,6 +489,7 @@ pub(crate) async fn deliver_announcement(
                 tg.allowed_users.clone(),
                 tg.mention_only,
                 tg.allowed_chats.clone(),
+                tg.allowed_dm_users.clone(),
             );
             channel
                 .send(&SendMessage::new(safe_output.as_str(), target))
