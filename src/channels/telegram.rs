@@ -839,6 +839,25 @@ impl TelegramChannel {
         allowed
     }
 
+    /// Check whether a user is allowed to DM the bot.
+    ///
+    /// - empty slice — allow all (no restriction)
+    /// - `"*"` — allow all DMs
+    /// - username or numeric ID — exact match
+    ///
+    /// Non-DM chats (groups, supergroups, channels) always pass.
+    fn is_dm_user_allowed(identities: &[&str], chat_type: &str, allowed_dm_users: &[String]) -> bool {
+        if chat_type != "private" {
+            return true;
+        }
+        if allowed_dm_users.is_empty() {
+            return true;
+        }
+        allowed_dm_users.iter().any(|entry| {
+            entry == "*" || identities.iter().any(|id| *id == entry.as_str())
+        })
+    }
+
     fn is_user_allowed(&self, username: &str) -> bool {
         let identity = Self::normalize_identity(username);
         self.allowed_users
@@ -5269,6 +5288,48 @@ mod tests {
         assert!(TelegramChannel::is_chat_allowed("123", "private", &chats));
         assert!(TelegramChannel::is_chat_allowed("-100999", "group", &chats));
         assert!(TelegramChannel::is_chat_allowed("-100999", "supergroup", &chats));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_empty_allows_all() {
+        assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "private", &[]));
+        assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "group", &[]));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_star_allows_all_dms() {
+        let users = vec!["*".to_string()];
+        assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "private", &users));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_specific_user() {
+        let users = vec!["alice".to_string()];
+        assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "private", &users));
+        assert!(!TelegramChannel::is_dm_user_allowed(&["bob"], "private", &users));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_by_numeric_id() {
+        let users = vec!["2852312".to_string()];
+        assert!(TelegramChannel::is_dm_user_allowed(&["unknown", "2852312"], "private", &users));
+        assert!(!TelegramChannel::is_dm_user_allowed(&["unknown", "999"], "private", &users));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_non_dm_always_passes() {
+        let users = vec!["alice".to_string()];
+        assert!(TelegramChannel::is_dm_user_allowed(&["bob"], "group", &users));
+        assert!(TelegramChannel::is_dm_user_allowed(&["bob"], "supergroup", &users));
+        assert!(TelegramChannel::is_dm_user_allowed(&["bob"], "channel", &users));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_mixed_users() {
+        let users = vec!["alice".to_string(), "2852312".to_string()];
+        assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "private", &users));
+        assert!(TelegramChannel::is_dm_user_allowed(&["unknown", "2852312"], "private", &users));
+        assert!(!TelegramChannel::is_dm_user_allowed(&["bob", "999"], "private", &users));
     }
 
     #[test]
