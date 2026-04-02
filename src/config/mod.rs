@@ -64,6 +64,8 @@ mod tests {
             mention_only: false,
             ack_reactions: None,
             proxy_url: None,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         };
 
         let discord = DiscordConfig {

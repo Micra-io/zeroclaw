@@ -6399,6 +6399,18 @@ pub struct TelegramConfig {
     /// Overrides the global `[proxy]` setting for this channel only.
     #[serde(default)]
     pub proxy_url: Option<String>,
+    /// Allowed chat IDs or keywords. Empty = allow all (no filtering).
+    /// Keywords: "dm" (private chats), "group" (groups + supergroups), "*" (all).
+    /// Numeric chat IDs for explicit matches (e.g. "-1001234567890").
+    /// Telegram "channel" type chats have no keyword — use explicit ID or "*".
+    #[serde(default)]
+    pub allowed_chats: Vec<String>,
+    /// Users allowed to DM the bot. Empty = allow all (no restriction).
+    /// When set, only these users can send direct messages to the bot.
+    /// Group messages are unaffected — governed by allowed_users + allowed_chats.
+    /// Supports usernames (without @) and numeric Telegram user IDs.
+    #[serde(default)]
+    pub allowed_dm_users: Vec<String>,
 }
 
 impl ChannelConfig for TelegramConfig {
@@ -11391,6 +11403,8 @@ auto_save = true
                     mention_only: false,
                     ack_reactions: None,
                     proxy_url: None,
+                    allowed_chats: vec![],
+                    allowed_dm_users: vec![],
                 }),
                 discord: None,
                 discord_history: None,
@@ -12206,6 +12220,8 @@ default_temperature = 0.7
             mention_only: false,
             ack_reactions: None,
             proxy_url: None,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         };
         let json = serde_json::to_string(&tc).unwrap();
         let parsed: TelegramConfig = serde_json::from_str(&json).unwrap();
@@ -15093,6 +15109,8 @@ require_otp_to_resume = true
             mention_only: false,
             ack_reactions: None,
             proxy_url: None,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         });
 
         // Save (triggers encryption)
