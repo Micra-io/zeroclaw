@@ -719,20 +719,30 @@ fn load_group_context(
     max_messages: usize,
     max_chars: usize,
 ) -> String {
-    let since = chrono::Utc::now() - chrono::Duration::minutes(window_minutes as i64);
     let session_key = format!("observe_whatsapp_{group_jid}");
-    let messages = observe_store.load_since_with_time(&session_key, since);
+
+    // Try time-windowed messages first.
+    let since = chrono::Utc::now() - chrono::Duration::minutes(window_minutes as i64);
+    let time_messages = observe_store.load_since_with_time(&session_key, since);
+
+    // If the time window returned fewer than max_messages, also load the
+    // last N messages regardless of time and use whichever set is larger.
+    // This ensures context is available even when the group has been quiet.
+    let messages = if time_messages.len() >= max_messages {
+        // Time window already has plenty — just cap it.
+        time_messages[time_messages.len() - max_messages..].to_vec()
+    } else {
+        let last_n = observe_store.load_last_n_with_time(&session_key, max_messages);
+        if last_n.len() > time_messages.len() {
+            last_n
+        } else {
+            time_messages
+        }
+    };
 
     if messages.is_empty() {
         return String::new();
     }
-
-    // Keep only the most recent max_messages
-    let messages: Vec<_> = if messages.len() > max_messages {
-        messages[messages.len() - max_messages..].to_vec()
-    } else {
-        messages
-    };
 
     // Format with timestamps so the LLM can reason about recency
     let mut lines: Vec<String> = messages
@@ -11610,6 +11620,33 @@ This is an example JSON object for profile settings."#;
         let result = load_group_context(&store, "verbose@g.us", 15, 30, 300);
         assert!(result.contains("Recent Group Conversation"));
         assert!(result.contains("[+4]")); // most recent kept
+    }
+
+    #[test]
+    fn load_group_context_falls_back_to_last_n_when_window_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        // Insert messages that are older than the 15-minute window
+        {
+            let conn_guard = store.conn.lock();
+            for i in 0..5 {
+                let ts = format!("2026-03-20T10:{:02}:00+00:00", i);
+                conn_guard.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, 'user', ?2, ?3)",
+                    rusqlite::params!["observe_whatsapp_old_group@g.us", format!("[+{i}] old msg {i}"), ts],
+                ).unwrap();
+            }
+        }
+
+        // With a 15-minute window, time-based query returns nothing — but
+        // fallback to last N should return the 5 old messages.
+        let result = load_group_context(&store, "old_group@g.us", 15, 30, 2000);
+        assert!(
+            result.contains("old msg 0"),
+            "fallback should include old messages, got: {result}"
+        );
+        assert!(result.contains("old msg 4"));
     }
 
     #[tokio::test]
