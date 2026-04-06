@@ -33,7 +33,15 @@ pub(crate) fn record_tool_loop_cost_usage(
     model: &str,
     usage: &crate::providers::traits::TokenUsage,
 ) -> Option<(u64, f64)> {
-    let input_tokens = usage.input_tokens.unwrap_or(0);
+    // Include cached tokens in the input count. Anthropic reports:
+    // - input_tokens: non-cached input tokens
+    // - cache_creation_input_tokens: tokens written to cache (1.25x input price)
+    // - cache_read_input_tokens: tokens read from cache (0.1x input price)
+    // For total token counting we sum all three; for cost we use input price
+    // as an approximation (cache pricing refinement can come later).
+    let base_input = usage.input_tokens.unwrap_or(0);
+    let cached_input = usage.cached_input_tokens.unwrap_or(0);
+    let input_tokens = base_input.saturating_add(cached_input);
     let output_tokens = usage.output_tokens.unwrap_or(0);
     let total_tokens = input_tokens.saturating_add(output_tokens);
     if total_tokens == 0 {

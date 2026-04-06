@@ -2002,6 +2002,7 @@ struct StreamedChatOutcome {
     response_text: String,
     tool_calls: Vec<ToolCall>,
     forwarded_live_deltas: bool,
+    usage: Option<crate::providers::traits::TokenUsage>,
 }
 
 async fn consume_provider_streaming_response(
@@ -2058,6 +2059,24 @@ async fn consume_provider_streaming_response(
                 // Pre-executed tool events are for observability only.
                 // They are forwarded to the gateway via turn_streamed but
                 // do not affect the agent's tool dispatch loop.
+            }
+            StreamEvent::Usage(usage) => {
+                // Merge streaming usage events (input from message_start,
+                // output from message_delta) into the accumulated usage.
+                let u = outcome.usage.get_or_insert(crate::providers::traits::TokenUsage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    cached_input_tokens: None,
+                });
+                if let Some(input) = usage.input_tokens {
+                    u.input_tokens = Some(input);
+                }
+                if let Some(output) = usage.output_tokens {
+                    u.output_tokens = Some(output);
+                }
+                if let Some(cached) = usage.cached_input_tokens {
+                    u.cached_input_tokens = Some(cached);
+                }
             }
             StreamEvent::TextDelta(chunk) => {
                 if chunk.delta.is_empty() {
@@ -2555,7 +2574,7 @@ pub(crate) async fn run_tool_call_loop(
                     Ok(crate::providers::ChatResponse {
                         text: Some(streamed.response_text),
                         tool_calls: streamed.tool_calls,
-                        usage: None,
+                        usage: streamed.usage,
                         reasoning_content: None,
                     })
                 }

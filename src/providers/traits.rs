@@ -195,6 +195,9 @@ pub enum StreamEvent {
     PreExecutedToolCall { name: String, args: String },
     /// The result of a pre-executed tool call.
     PreExecutedToolResult { name: String, output: String },
+    /// Token usage reported during streaming (e.g. Anthropic `message_start`
+    /// + `message_delta` events).
+    Usage(TokenUsage),
     /// Stream has completed.
     Final,
 }

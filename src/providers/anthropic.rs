@@ -569,10 +569,20 @@ impl AnthropicProvider {
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
 
-        let usage = response.usage.map(|u| TokenUsage {
-            input_tokens: u.input_tokens,
-            output_tokens: u.output_tokens,
-            cached_input_tokens: u.cache_read_input_tokens,
+        let usage = response.usage.map(|u| {
+            // Combine cache_creation + cache_read into cached_input_tokens
+            // so cost tracking sees the full picture of cached prompt tokens.
+            let cached = match (u.cache_creation_input_tokens, u.cache_read_input_tokens) {
+                (Some(a), Some(b)) => Some(a.saturating_add(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            TokenUsage {
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                cached_input_tokens: cached,
+            }
         });
 
         for block in response.content {
@@ -679,6 +689,20 @@ impl AnthropicProvider {
                         input_tokens = input_tokens,
                         "Anthropic stream: message_start"
                     );
+                    if input_tokens > 0 {
+                        let cache_read = event
+                            .get("message")
+                            .and_then(|m| m.get("usage"))
+                            .and_then(|u| u.get("cache_read_input_tokens"))
+                            .and_then(|t| t.as_u64());
+                        let _ = tx
+                            .send(Ok(StreamEvent::Usage(TokenUsage {
+                                input_tokens: Some(input_tokens),
+                                output_tokens: None,
+                                cached_input_tokens: cache_read,
+                            })))
+                            .await;
+                    }
                 }
                 "content_block_start" => {
                     if let Some(block) = event.get("content_block") {
@@ -777,6 +801,15 @@ impl AnthropicProvider {
                             output_tokens = output_tokens,
                             "Anthropic stream: message_delta"
                         );
+                    }
+                    if output_tokens > 0 {
+                        let _ = tx
+                            .send(Ok(StreamEvent::Usage(TokenUsage {
+                                input_tokens: None,
+                                output_tokens: Some(output_tokens),
+                                cached_input_tokens: None,
+                            })))
+                            .await;
                     }
                 }
                 "message_stop" => {
