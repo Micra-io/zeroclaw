@@ -1066,6 +1066,10 @@ impl Agent {
                         } => {
                             let _ = event_tx.send(TurnEvent::ToolResult { name, output }).await;
                         }
+                        crate::providers::traits::StreamEvent::Usage(_) => {
+                            // Usage events are handled by the tool-call loop;
+                            // the gateway streaming path ignores them.
+                        }
                         crate::providers::traits::StreamEvent::Final => break,
                     },
                     Err(_) => break,
