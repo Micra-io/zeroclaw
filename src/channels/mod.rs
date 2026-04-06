@@ -1388,6 +1388,8 @@ fn is_tool_call_content(content: &str) -> bool {
     let trimmed = content.trim();
     trimmed.contains("<tool_call>")
         || trimmed.starts_with("{\"tool_call\"")
+        || trimmed.starts_with("{\"tool_calls\"")
+        || trimmed.contains("\"tool_calls\":")
         || trimmed.starts_with("{\"name\"")
 }
 

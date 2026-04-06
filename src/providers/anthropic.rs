@@ -492,6 +492,58 @@ impl AnthropicProvider {
             }
         }
 
+        // ── Sanitize orphan tool_use messages ──────────────────────
+        // History trimming (proactive_trim_turns, strip_old_tool_context,
+        // emergency_history_trim) can break assistant(tool_use) + user(tool_result)
+        // pairs. The API rejects orphan tool_use blocks without matching
+        // tool_result. Walk backwards: if the last assistant message has ToolUse
+        // blocks, check that the immediately following message contains all the
+        // matching ToolResult blocks. Drop orphaned ToolUse messages.
+        let mut i = 0;
+        while i < native_messages.len() {
+            let has_tool_use = native_messages[i].role == "assistant"
+                && native_messages[i]
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, NativeContentOut::ToolUse { .. }));
+            if has_tool_use {
+                // Collect tool_use IDs from this assistant message
+                let tool_use_ids: Vec<String> = native_messages[i]
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        NativeContentOut::ToolUse { id, .. } => Some(id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+
+                // Check if next message has matching tool_result blocks
+                let all_matched = if i + 1 < native_messages.len() {
+                    tool_use_ids.iter().all(|tu_id| {
+                        native_messages[i + 1].content.iter().any(|b| match b {
+                            NativeContentOut::ToolResult { tool_use_id, .. } => {
+                                tool_use_id == tu_id
+                            }
+                            _ => false,
+                        })
+                    })
+                } else {
+                    false
+                };
+
+                if !all_matched {
+                    tracing::warn!(
+                        tool_use_ids = ?tool_use_ids,
+                        "Dropping orphan assistant tool_use message at index {i} \
+                         (no matching tool_result follows)"
+                    );
+                    native_messages.remove(i);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+
         // Always use Blocks format with cache_control for system prompts
         let system_prompt = system_text.map(|text| {
             SystemPrompt::Blocks(vec![SystemBlock {
