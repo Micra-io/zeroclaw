@@ -993,6 +993,8 @@ mod tests {
             mention_only: false,
             ack_reactions: None,
             proxy_url: None,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         });
         assert!(has_supervised_channels(&config));
     }
@@ -1118,6 +1120,8 @@ mod tests {
             mention_only: false,
             ack_reactions: None,
             proxy_url: None,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         });
 
         let target = resolve_heartbeat_delivery(&config).unwrap();
@@ -1136,6 +1140,8 @@ mod tests {
             mention_only: false,
             ack_reactions: None,
             proxy_url: None,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         });
 
         let target = resolve_heartbeat_delivery(&config).unwrap();

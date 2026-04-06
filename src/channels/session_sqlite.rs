@@ -152,6 +152,43 @@ impl SqliteSessionBackend {
         rows.filter_map(|r| r.ok()).collect()
     }
 
+    /// Load the last `n` messages for a session key regardless of time, with timestamps.
+    /// Results are returned in chronological order (oldest first).
+    pub fn load_last_n_with_time(
+        &self,
+        session_key: &str,
+        n: usize,
+    ) -> Vec<TimestampedMessage> {
+        let conn = self.conn.lock();
+        // Select in reverse order then reverse so we get the tail in chronological order.
+        let mut stmt = match conn.prepare(
+            "SELECT role, content, created_at FROM sessions \
+             WHERE session_key = ?1 \
+             ORDER BY id DESC LIMIT ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        #[allow(clippy::cast_possible_wrap)]
+        let rows = match stmt.query_map(params![session_key, n as i64], |row| {
+            Ok(TimestampedMessage {
+                message: ChatMessage {
+                    role: row.get(0)?,
+                    content: row.get(1)?,
+                },
+                created_at: row.get(2)?,
+            })
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut results: Vec<_> = rows.filter_map(|r| r.ok()).collect();
+        results.reverse();
+        results
+    }
+
     /// Migrate JSONL session files into SQLite. Renames migrated files to `.jsonl.migrated`.
     pub fn migrate_from_jsonl(&self, workspace_dir: &Path) -> Result<usize> {
         let sessions_dir = workspace_dir.join("sessions");
@@ -1033,6 +1070,62 @@ mod tests {
 
         let since = chrono::Utc::now();
         let messages = store.load_since(key, since);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn load_last_n_with_time_returns_most_recent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+        let key = "observe_whatsapp_test_group";
+
+        {
+            let conn = store.conn.lock();
+            for (i, text) in ["first", "second", "third", "fourth", "fifth"]
+                .iter()
+                .enumerate()
+            {
+                let ts = format!("2026-03-24T10:{:02}:00+00:00", i);
+                conn.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![key, "user", format!("[+111] {text}"), ts],
+                ).unwrap();
+            }
+        }
+
+        let messages = store.load_last_n_with_time(key, 3);
+        assert_eq!(messages.len(), 3);
+        // Should be in chronological order (oldest first)
+        assert!(messages[0].message.content.contains("third"));
+        assert!(messages[1].message.content.contains("fourth"));
+        assert!(messages[2].message.content.contains("fifth"));
+    }
+
+    #[test]
+    fn load_last_n_with_time_returns_all_when_fewer_than_n() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+        let key = "observe_whatsapp_small";
+
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![key, "user", "[+111] only one", "2026-03-24T10:00:00+00:00"],
+            ).unwrap();
+        }
+
+        let messages = store.load_last_n_with_time(key, 10);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].message.content.contains("only one"));
+    }
+
+    #[test]
+    fn load_last_n_with_time_empty_session() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let messages = store.load_last_n_with_time("nonexistent", 5);
         assert!(messages.is_empty());
     }
 }
