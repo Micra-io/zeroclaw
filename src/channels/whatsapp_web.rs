@@ -1455,36 +1455,71 @@ impl Channel for WhatsAppWebChannel {
                                     }
                                 }
 
-                                // mention_only: skip group messages without a bot mention
+                                // mention_only: normalize structured @phone mentions
+                                // from the content. The text-based mention_name check
+                                // already ran above (line ~1287), so we only gate here
+                                // on structured bot mentions — text mention_name matches
+                                // are accepted unconditionally.
                                 let content = if mention_only && is_group {
                                     let bot_phone = bot_phone_inner.lock();
                                     if let Some(ref bp) = *bot_phone {
                                         let mentioned_jids =
                                             Self::extract_mentioned_jids(&msg);
-                                        if !Self::contains_bot_mention(
+                                        if Self::contains_bot_mention(
                                             &content,
                                             &mentioned_jids,
                                             bp,
                                         ) {
+                                            // Structured mention: strip @phone from content
+                                            match Self::normalize_incoming_content(
+                                                &content, bp,
+                                            ) {
+                                                Some(c) => c,
+                                                None => {
+                                                    tracing::debug!(
+                                                        "WhatsApp Web: message empty after stripping mention"
+                                                    );
+                                                    return;
+                                                }
+                                            }
+                                        } else if mention_name
+                                            .as_deref()
+                                            .is_some_and(|name| Self::contains_mention(&content, name))
+                                        {
+                                            // Text mention_name match (e.g. "claw"):
+                                            // strip the mention_name from content
+                                            let name = mention_name.as_deref().unwrap();
+                                            let lower = content.to_lowercase();
+                                            let name_lower = name.to_lowercase();
+                                            if let Some(pos) = lower.find(&name_lower) {
+                                                let mut stripped = String::with_capacity(content.len());
+                                                stripped.push_str(&content[..pos]);
+                                                stripped.push_str(&content[pos + name.len()..]);
+                                                let trimmed = stripped.trim().to_string();
+                                                if trimmed.is_empty() {
+                                                    tracing::debug!(
+                                                        "WhatsApp Web: message empty after stripping mention_name"
+                                                    );
+                                                    return;
+                                                }
+                                                trimmed
+                                            } else {
+                                                content
+                                            }
+                                        } else {
                                             tracing::debug!(
                                                 "WhatsApp Web: ignoring group message without bot mention"
                                             );
                                             return;
                                         }
-                                        match Self::normalize_incoming_content(
-                                            &content, bp,
-                                        ) {
-                                            Some(c) => c,
-                                            None => {
-                                                tracing::debug!(
-                                                    "WhatsApp Web: message empty after stripping mention"
-                                                );
-                                                return;
-                                            }
-                                        }
+                                    } else if mention_name.as_deref().is_some_and(|name| {
+                                        Self::contains_mention(&content, name)
+                                    }) {
+                                        // Bot identity unknown but mention_name matched
+                                        content
                                     } else {
                                         tracing::debug!(
-                                            "WhatsApp Web: mention_only active but bot identity unknown, skipping group msg"
+                                            "WhatsApp Web: mention_only active but bot identity unknown and no mention_name match, skipping group msg"
                                         );
                                         return;
                                     }
