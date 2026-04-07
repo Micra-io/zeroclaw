@@ -561,7 +561,17 @@ impl Agent {
 
     fn trim_history(&mut self) {
         let max = self.config.max_history_messages;
-        if self.history.len() <= max {
+        // Chunked mode (default): only fire when the buffer has grown to
+        // `2 * max`, then drain back to `max` in a single batch so the
+        // conversation prefix stays byte-stable for the next `max`
+        // turns. Legacy mode fires as soon as we exceed `max`, which
+        // invalidates the Anthropic message-level cache every turn.
+        let threshold = if self.config.history_trim_chunked {
+            max.saturating_mul(2)
+        } else {
+            max
+        };
+        if self.history.len() <= threshold {
             return;
         }
 
