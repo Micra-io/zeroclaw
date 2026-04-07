@@ -2067,6 +2067,7 @@ async fn consume_provider_streaming_response(
                     input_tokens: None,
                     output_tokens: None,
                     cached_input_tokens: None,
+                    ..Default::default()
                 });
                 if let Some(input) = usage.input_tokens {
                     u.input_tokens = Some(input);
@@ -2497,6 +2498,23 @@ pub(crate) async fn run_tool_call_loop(
             let _ = tx.send(DraftEvent::Progress(phase)).await;
         }
 
+        // Tier 2: capture the full input payload (system prompt, all input
+        // messages, tool definitions) once before the provider call so it
+        // can be passed into the LlmResponse event below. We could emit this
+        // on LlmRequest instead, but the OtelObserver builds a single span
+        // from LlmResponse and needs both sides on one event.
+        let system_prompt_snapshot = history
+            .iter()
+            .find(|m| m.role == "system")
+            .map(|m| m.content.clone());
+        let input_messages_snapshot: Vec<crate::observability::traits::MessageSnapshot> =
+            history.iter().map(Into::into).collect();
+        let tool_definitions_snapshot: Vec<crate::observability::traits::ToolSpecSnapshot> =
+            if use_native_tools {
+                tool_specs.iter().map(Into::into).collect()
+            } else {
+                Vec::new()
+            };
         observer.record_event(&ObserverEvent::LlmRequest {
             provider: active_provider_name.to_string(),
             model: active_model.to_string(),
@@ -2680,11 +2698,31 @@ pub(crate) async fn run_tool_call_loop(
             response_streamed_live,
         ) = match chat_result {
             Ok(resp) => {
-                let (resp_input_tokens, resp_output_tokens) = resp
+                let (
+                    resp_input_tokens,
+                    resp_output_tokens,
+                    resp_cache_read_tokens,
+                    resp_cache_creation_tokens,
+                ) = resp
                     .usage
                     .as_ref()
-                    .map(|u| (u.input_tokens, u.output_tokens))
-                    .unwrap_or((None, None));
+                    .map(|u| {
+                        (
+                            u.input_tokens,
+                            u.output_tokens,
+                            u.cache_read_input_tokens,
+                            u.cache_creation_input_tokens,
+                        )
+                    })
+                    .unwrap_or((None, None, None, None));
+
+                // Tier 2: carry full response payload (assistant text + tool
+                // calls) into the observer event so OTel exporters can emit
+                // gen_ai.output.messages and the tool call breakdown.
+                let resp_output_text = resp.text.clone();
+                let resp_output_tool_calls: Vec<
+                    crate::observability::traits::ToolCallSnapshot,
+                > = resp.tool_calls.iter().map(Into::into).collect();
 
                 observer.record_event(&ObserverEvent::LlmResponse {
                     provider: provider_name.to_string(),
@@ -2692,8 +2730,15 @@ pub(crate) async fn run_tool_call_loop(
                     duration: llm_started_at.elapsed(),
                     success: true,
                     error_message: None,
+                    system_prompt: system_prompt_snapshot.clone(),
+                    input_messages: input_messages_snapshot.clone(),
+                    tool_definitions: tool_definitions_snapshot.clone(),
                     input_tokens: resp_input_tokens,
                     output_tokens: resp_output_tokens,
+                    cache_read_input_tokens: resp_cache_read_tokens,
+                    cache_creation_input_tokens: resp_cache_creation_tokens,
+                    output_text: resp_output_text,
+                    output_tool_calls: resp_output_tool_calls,
                 });
 
                 // Record cost via task-local tracker (no-op when not scoped)
@@ -2807,8 +2852,15 @@ pub(crate) async fn run_tool_call_loop(
                     duration: llm_started_at.elapsed(),
                     success: false,
                     error_message: Some(safe_error.clone()),
+                    system_prompt: system_prompt_snapshot.clone(),
+                    input_messages: input_messages_snapshot.clone(),
+                    tool_definitions: tool_definitions_snapshot.clone(),
                     input_tokens: None,
                     output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    output_text: None,
+                    output_tool_calls: Vec::new(),
                 });
                 runtime_trace::record_event(
                     "llm_response",
@@ -5153,7 +5205,7 @@ mod tests {
 
         let observer = NoopObserver;
         let result =
-            execute_one_tool("unknown_tool", call_arguments, &[], None, &observer, None).await;
+            execute_one_tool("unknown_tool", call_arguments, None, &[], None, &observer, None).await;
         assert!(result.is_ok(), "execute_one_tool should not panic or error");
 
         let outcome = result.unwrap();
@@ -5178,6 +5230,7 @@ mod tests {
         let outcome = execute_one_tool(
             "extract_text",
             serde_json::json!({ "value": "ok" }),
+            None,
             &[],
             Some(&activated),
             &observer,
@@ -9373,6 +9426,7 @@ Let me check the result."#;
                     input_tokens: Some(1_000),
                     output_tokens: Some(200),
                     cached_input_tokens: None,
+                    ..Default::default()
                 }),
                 reasoning_content: None,
             }]))),
@@ -9533,6 +9587,7 @@ Let me check the result."#;
                     input_tokens: Some(500),
                     output_tokens: Some(100),
                     cached_input_tokens: None,
+                    ..Default::default()
                 }),
                 reasoning_content: None,
             }]))),

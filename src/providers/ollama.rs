@@ -767,6 +767,7 @@ impl Provider for OllamaProvider {
                 input_tokens: response.prompt_eval_count,
                 output_tokens: response.eval_count,
                 cached_input_tokens: None,
+                ..Default::default()
             })
         } else {
             None

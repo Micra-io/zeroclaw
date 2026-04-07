@@ -20,6 +20,7 @@ impl Observer for VerboseObserver {
                 provider,
                 model,
                 messages_count,
+                ..
             } => {
                 eprintln!("> Thinking");
                 eprintln!(
@@ -40,6 +41,7 @@ impl Observer for VerboseObserver {
                 tool,
                 duration,
                 success,
+                ..
             } => {
                 let ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
                 eprintln!("< Tool {tool} (success={success}, duration_ms={ms})");
@@ -89,15 +91,23 @@ mod tests {
             error_message: None,
             input_tokens: Some(50),
             output_tokens: Some(25),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            output_text: None,
+            output_tool_calls: Vec::new(),
         });
         obs.record_event(&ObserverEvent::ToolCallStart {
             tool: "shell".into(),
             arguments: None,
+            tool_call_id: None,
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "shell".into(),
             duration: Duration::from_millis(2),
             success: true,
+            tool_call_id: None,
+            arguments: None,
+            result: None,
         });
         obs.record_event(&ObserverEvent::TurnComplete);
     }

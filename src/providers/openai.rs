@@ -444,6 +444,7 @@ impl Provider for OpenAiProvider {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
             cached_input_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
+            ..Default::default()
         });
         let message = native_response
             .choices
@@ -511,6 +512,7 @@ impl Provider for OpenAiProvider {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
             cached_input_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
+            ..Default::default()
         });
         let message = native_response
             .choices

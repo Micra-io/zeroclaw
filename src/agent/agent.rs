@@ -606,28 +606,37 @@ impl Agent {
     async fn execute_tool_call(&self, call: &ParsedToolCall) -> ToolExecutionResult {
         let start = Instant::now();
 
+        let args_json = call.arguments.to_string();
         // First try to find tool in static registry, then in activated MCP tools.
         let result = if let Some(tool) = self.tools.iter().find(|t| t.name() == call.name) {
             match tool.execute(call.arguments.clone()).await {
                 Ok(r) => {
+                    let outcome_text = if r.success {
+                        r.output.clone()
+                    } else {
+                        format!("Error: {}", r.error.clone().unwrap_or_else(|| r.output.clone()))
+                    };
                     self.observer.record_event(&ObserverEvent::ToolCall {
                         tool: call.name.clone(),
+                        tool_call_id: call.tool_call_id.clone(),
                         duration: start.elapsed(),
                         success: r.success,
+                        arguments: Some(args_json.clone()),
+                        result: Some(outcome_text.clone()),
                     });
-                    if r.success {
-                        r.output
-                    } else {
-                        format!("Error: {}", r.error.unwrap_or(r.output))
-                    }
+                    if r.success { r.output } else { outcome_text }
                 }
                 Err(e) => {
+                    let err_text = format!("Error executing {}: {e}", call.name);
                     self.observer.record_event(&ObserverEvent::ToolCall {
                         tool: call.name.clone(),
+                        tool_call_id: call.tool_call_id.clone(),
                         duration: start.elapsed(),
                         success: false,
+                        arguments: Some(args_json.clone()),
+                        result: Some(err_text.clone()),
                     });
-                    format!("Error executing {}: {e}", call.name)
+                    err_text
                 }
             }
         } else if let Some(activated_arc) = self.activated_tools.as_ref() {
@@ -636,24 +645,32 @@ impl Agent {
             if let Some(tool) = activated_opt {
                 match tool.execute(call.arguments.clone()).await {
                     Ok(r) => {
+                        let outcome_text = if r.success {
+                            r.output.clone()
+                        } else {
+                            format!("Error: {}", r.error.clone().unwrap_or_else(|| r.output.clone()))
+                        };
                         self.observer.record_event(&ObserverEvent::ToolCall {
                             tool: call.name.clone(),
+                            tool_call_id: call.tool_call_id.clone(),
                             duration: start.elapsed(),
                             success: r.success,
+                            arguments: Some(args_json.clone()),
+                            result: Some(outcome_text.clone()),
                         });
-                        if r.success {
-                            r.output
-                        } else {
-                            format!("Error: {}", r.error.unwrap_or(r.output))
-                        }
+                        if r.success { r.output } else { outcome_text }
                     }
                     Err(e) => {
+                        let err_text = format!("Error executing {}: {e}", call.name);
                         self.observer.record_event(&ObserverEvent::ToolCall {
                             tool: call.name.clone(),
+                            tool_call_id: call.tool_call_id.clone(),
                             duration: start.elapsed(),
                             success: false,
+                            arguments: Some(args_json.clone()),
+                            result: Some(err_text.clone()),
                         });
-                        format!("Error executing {}: {e}", call.name)
+                        err_text
                     }
                 }
             } else {

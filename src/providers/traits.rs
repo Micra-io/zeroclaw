@@ -56,7 +56,22 @@ pub struct TokenUsage {
     pub output_tokens: Option<u64>,
     /// Tokens served from the provider's prompt cache (Anthropic `cache_read_input_tokens`,
     /// OpenAI `prompt_tokens_details.cached_tokens`).
+    ///
+    /// This field carries the **combined** sum of `cache_read_input_tokens` and
+    /// `cache_creation_input_tokens` for backward compatibility with the cost
+    /// tracker, which only needs a single "cached" total. Observability code
+    /// that needs the breakdown should read the two granular fields below.
     pub cached_input_tokens: Option<u64>,
+    /// Tokens read from the provider's prompt cache on this call. Anthropic
+    /// charges these at a steep discount (~10% of normal). Granular field for
+    /// observability — preserved separately so OTel exporters can emit
+    /// `gen_ai.usage.cache_read_input_tokens`.
+    pub cache_read_input_tokens: Option<u64>,
+    /// Tokens written to the provider's prompt cache on this call. Anthropic
+    /// charges these at a slight markup (~125% of normal) since cache writes
+    /// are amortized. Granular field for observability — preserved separately
+    /// so OTel exporters can emit `gen_ai.usage.cache_creation_input_tokens`.
+    pub cache_creation_input_tokens: Option<u64>,
 }
 
 /// An LLM response that may contain text, tool calls, or both.
@@ -652,6 +667,7 @@ mod tests {
                 input_tokens: Some(100),
                 output_tokens: Some(50),
                 cached_input_tokens: None,
+                ..Default::default()
             }),
             reasoning_content: None,
         };

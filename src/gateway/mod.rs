@@ -1468,8 +1468,17 @@ async fn handle_webhook(
                     duration,
                     success: true,
                     error_message: None,
+                    // Gateway single-shot path doesn't expose history/system
+                    // prompt/tools at this layer; observers see empty payload.
+                    system_prompt: None,
+                    input_messages: Vec::new(),
+                    tool_definitions: Vec::new(),
                     input_tokens: None,
                     output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    output_text: Some(response.clone()),
+                    output_tool_calls: Vec::new(),
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -1499,8 +1508,15 @@ async fn handle_webhook(
                     duration,
                     success: false,
                     error_message: Some(sanitized.clone()),
+                    system_prompt: None,
+                    input_messages: Vec::new(),
+                    tool_definitions: Vec::new(),
                     input_tokens: None,
                     output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    output_text: None,
+                    output_tool_calls: Vec::new(),
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),

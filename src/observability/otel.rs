@@ -219,32 +219,192 @@ impl Observer for OtelObserver {
                 duration,
                 success,
                 error_message: _,
-                input_tokens: _,
-                output_tokens: _,
+                system_prompt,
+                input_messages,
+                tool_definitions,
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+                output_text,
+                output_tool_calls,
             } => {
                 let secs = duration.as_secs_f64();
-                let attrs = [
+                let metric_attrs = [
                     KeyValue::new("provider", provider.clone()),
                     KeyValue::new("model", model.clone()),
                     KeyValue::new("success", success.to_string()),
                 ];
-                self.llm_calls.add(1, &attrs);
-                self.llm_duration.record(secs, &attrs);
+                self.llm_calls.add(1, &metric_attrs);
+                self.llm_duration.record(secs, &metric_attrs);
 
                 // Create a completed span for visibility in trace backends.
                 let start_time = SystemTime::now()
                     .checked_sub(*duration)
                     .unwrap_or(SystemTime::now());
+
+                // Build span attributes. Legacy ZeroClaw-internal names are
+                // kept for backward compatibility; OpenTelemetry gen_ai.*
+                // semantic-convention attributes are added so LLM-aware
+                // backends (Langfuse, SigNoz, Phoenix) recognize the span
+                // as a GenAI call and surface token counts, cost, and the
+                // full conversation in their viewer.
+                let mut span_attrs = vec![
+                    // ── Legacy ZeroClaw-internal attrs ────────────────
+                    KeyValue::new("provider", provider.clone()),
+                    KeyValue::new("model", model.clone()),
+                    KeyValue::new("success", *success),
+                    KeyValue::new("duration_s", secs),
+                    // ── OTel gen_ai semantic conventions ──────────────
+                    KeyValue::new("gen_ai.system", provider.clone()),
+                    KeyValue::new("gen_ai.operation.name", "chat"),
+                    KeyValue::new("gen_ai.request.model", model.clone()),
+                    KeyValue::new("gen_ai.response.model", model.clone()),
+                ];
+
+                // Token usage — both legacy single-field cached_input_tokens
+                // and the granular gen_ai.usage.cache_{read,creation}_input_tokens
+                // breakdown so Langfuse can compute cache pricing correctly.
+                if let Some(it) = input_tokens {
+                    span_attrs.push(KeyValue::new(
+                        "gen_ai.usage.input_tokens",
+                        *it as i64,
+                    ));
+                }
+                if let Some(ot) = output_tokens {
+                    span_attrs.push(KeyValue::new(
+                        "gen_ai.usage.output_tokens",
+                        *ot as i64,
+                    ));
+                }
+                if let Some(cr) = cache_read_input_tokens {
+                    span_attrs.push(KeyValue::new(
+                        "gen_ai.usage.cache_read_input_tokens",
+                        *cr as i64,
+                    ));
+                }
+                if let Some(cc) = cache_creation_input_tokens {
+                    span_attrs.push(KeyValue::new(
+                        "gen_ai.usage.cache_creation_input_tokens",
+                        *cc as i64,
+                    ));
+                }
+                // Derived total: visible new + cache read + cache creation.
+                // Useful for cost dashboards that want a single "true total
+                // input tokens" number. Skip if no fresh input_tokens — the
+                // call is too degenerate to bother summing.
+                if input_tokens.is_some() {
+                    let total = input_tokens.unwrap_or(0)
+                        + cache_read_input_tokens.unwrap_or(0)
+                        + cache_creation_input_tokens.unwrap_or(0);
+                    span_attrs.push(KeyValue::new(
+                        "gen_ai.usage.total_input_tokens",
+                        total as i64,
+                    ));
+                }
+
+                // Full system prompt — single attribute (not an array)
+                // matching OTel's gen_ai.system_instructions convention.
+                if let Some(sp) = system_prompt {
+                    span_attrs.push(KeyValue::new(
+                        "gen_ai.system_instructions",
+                        sp.clone(),
+                    ));
+                }
+
+                // Full input messages — JSON-encoded array of {role, content}
+                // objects, matching the OpenAI/Anthropic API shape Langfuse
+                // expects in gen_ai.input.messages. We strip the system
+                // message from this array since system_instructions already
+                // carries it (avoids double-display in Langfuse UI).
+                let input_messages_json = serde_json::to_string(
+                    &input_messages
+                        .iter()
+                        .filter(|m| m.role != "system")
+                        .map(|m| {
+                            serde_json::json!({
+                                "role": m.role,
+                                "content": m.content,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_else(|_| "[]".to_string());
+                if input_messages_json != "[]" {
+                    span_attrs.push(KeyValue::new(
+                        "gen_ai.input.messages",
+                        input_messages_json,
+                    ));
+                }
+
+                // Tool definitions — JSON-encoded array. Langfuse renders
+                // this as a separate Tools tab on the trace.
+                if !tool_definitions.is_empty() {
+                    let tools_json = serde_json::to_string(
+                        &tool_definitions
+                            .iter()
+                            .map(|t| {
+                                serde_json::json!({
+                                    "name": t.name,
+                                    "description": t.description,
+                                    // parameters_json is already a JSON string;
+                                    // re-parse it so the resulting attribute is
+                                    // a single nested JSON tree (not double-encoded).
+                                    "parameters": serde_json::from_str::<serde_json::Value>(
+                                        &t.parameters_json,
+                                    )
+                                    .unwrap_or(serde_json::Value::Null),
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap_or_else(|_| "[]".to_string());
+                    span_attrs.push(KeyValue::new("gen_ai.tool.definitions", tools_json));
+                }
+
+                // Output messages — single assistant turn comprising the
+                // text response (if any) plus any tool calls the model made.
+                // Encoded the same way as input.messages so Langfuse renders
+                // them symmetrically.
+                let mut output_msg = serde_json::Map::new();
+                output_msg.insert(
+                    "role".to_string(),
+                    serde_json::Value::String("assistant".to_string()),
+                );
+                if let Some(text) = output_text.as_ref().filter(|t| !t.is_empty()) {
+                    output_msg.insert(
+                        "content".to_string(),
+                        serde_json::Value::String(text.clone()),
+                    );
+                }
+                if !output_tool_calls.is_empty() {
+                    let tool_calls_json: Vec<_> = output_tool_calls
+                        .iter()
+                        .map(|tc| {
+                            serde_json::json!({
+                                "id": tc.id,
+                                "name": tc.name,
+                                "arguments": serde_json::from_str::<serde_json::Value>(
+                                    &tc.arguments_json,
+                                )
+                                .unwrap_or(serde_json::Value::Null),
+                            })
+                        })
+                        .collect();
+                    output_msg.insert(
+                        "tool_calls".to_string(),
+                        serde_json::Value::Array(tool_calls_json),
+                    );
+                }
+                let output_messages_json = serde_json::to_string(&vec![output_msg])
+                    .unwrap_or_else(|_| "[]".to_string());
+                span_attrs.push(KeyValue::new("gen_ai.output.messages", output_messages_json));
+
                 let mut span = tracer.build(
                     opentelemetry::trace::SpanBuilder::from_name("llm.call")
-                        .with_kind(SpanKind::Internal)
+                        .with_kind(SpanKind::Client)
                         .with_start_time(start_time)
-                        .with_attributes(vec![
-                            KeyValue::new("provider", provider.clone()),
-                            KeyValue::new("model", model.clone()),
-                            KeyValue::new("success", *success),
-                            KeyValue::new("duration_s", secs),
-                        ]),
+                        .with_attributes(span_attrs),
                 );
                 if *success {
                     span.set_status(Status::Ok);
@@ -296,8 +456,11 @@ impl Observer for OtelObserver {
             }
             ObserverEvent::ToolCall {
                 tool,
+                tool_call_id,
                 duration,
                 success,
+                arguments,
+                result,
             } => {
                 let secs = duration.as_secs_f64();
                 let start_time = SystemTime::now()
@@ -310,24 +473,53 @@ impl Observer for OtelObserver {
                     Status::error("")
                 };
 
+                // Build span attrs with both legacy ZeroClaw-internal names
+                // and OTel gen_ai.tool.* semantic conventions so Langfuse
+                // recognizes the span as a tool execution and surfaces
+                // arguments/result in its UI.
+                let mut span_attrs = vec![
+                    // Legacy
+                    KeyValue::new("tool.name", tool.clone()),
+                    KeyValue::new("tool.success", *success),
+                    KeyValue::new("duration_s", secs),
+                    // gen_ai semantic conventions
+                    KeyValue::new("gen_ai.operation.name", "execute_tool"),
+                    KeyValue::new("gen_ai.tool.name", tool.clone()),
+                ];
+                if let Some(id) = tool_call_id {
+                    span_attrs.push(KeyValue::new("gen_ai.tool.call.id", id.clone()));
+                }
+                if let Some(args) = arguments {
+                    span_attrs.push(KeyValue::new(
+                        "gen_ai.tool.arguments",
+                        args.clone(),
+                    ));
+                    // Also stash as Langfuse-native input field so the UI
+                    // shows it in the Input pane.
+                    span_attrs.push(KeyValue::new("input.value", args.clone()));
+                }
+                if let Some(res) = result {
+                    span_attrs.push(KeyValue::new(
+                        "gen_ai.tool.result",
+                        res.clone(),
+                    ));
+                    span_attrs.push(KeyValue::new("output.value", res.clone()));
+                }
+
                 let mut span = tracer.build(
                     opentelemetry::trace::SpanBuilder::from_name("tool.call")
                         .with_kind(SpanKind::Internal)
                         .with_start_time(start_time)
-                        .with_attributes(vec![
-                            KeyValue::new("tool.name", tool.clone()),
-                            KeyValue::new("tool.success", *success),
-                            KeyValue::new("duration_s", secs),
-                        ]),
+                        .with_attributes(span_attrs),
                 );
                 span.set_status(status);
                 span.end();
 
-                let attrs = [
+                let metric_attrs = [
                     KeyValue::new("tool", tool.clone()),
                     KeyValue::new("success", success.to_string()),
                 ];
-                self.tool_calls.add(1, &attrs);
+                self.tool_calls.add(1, &metric_attrs);
                 self.tool_duration
                     .record(secs, &[KeyValue::new("tool", tool.clone())]);
             }
@@ -500,6 +692,19 @@ impl Observer for OtelObserver {
     }
 }
 
+/// Best-effort flush on Drop so short-lived processes (e.g. `zeroclaw agent`
+/// CLI invocations) export their spans before the OS reaps the process.
+/// Long-running daemons get this for free via the periodic batch processor,
+/// but the CLI path exits immediately after the response is printed and
+/// would otherwise lose any spans still buffered in the SDK exporter queue.
+impl Drop for OtelObserver {
+    fn drop(&mut self) {
+        // Use the trait method, which already wraps both providers and logs
+        // any flush errors. We can't propagate errors out of Drop anyway.
+        <Self as Observer>::flush(self);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,6 +749,10 @@ mod tests {
             error_message: None,
             input_tokens: Some(100),
             output_tokens: Some(50),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            output_text: None,
+            output_tool_calls: Vec::new(),
         });
         obs.record_event(&ObserverEvent::AgentEnd {
             provider: "openrouter".into(),
@@ -562,16 +771,23 @@ mod tests {
         obs.record_event(&ObserverEvent::ToolCallStart {
             tool: "shell".into(),
             arguments: None,
+            tool_call_id: None,
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "shell".into(),
             duration: Duration::from_millis(10),
             success: true,
+            tool_call_id: None,
+            arguments: None,
+            result: None,
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "file_read".into(),
             duration: Duration::from_millis(5),
             success: false,
+            tool_call_id: None,
+            arguments: None,
+            result: None,
         });
         obs.record_event(&ObserverEvent::TurnComplete);
         obs.record_event(&ObserverEvent::ChannelMessage {
@@ -625,6 +841,10 @@ mod tests {
             error_message: Some("404 Not Found".into()),
             input_tokens: None,
             output_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            output_text: None,
+            output_tool_calls: Vec::new(),
         });
     }
 
