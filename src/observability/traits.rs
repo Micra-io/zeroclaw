@@ -1,33 +1,106 @@
 use std::time::Duration;
 
+/// Owned snapshot of a single chat message, used by observability events to
+/// carry full message bodies into observers without depending on the provider
+/// crate's `ChatMessage` type. Constructed via `From<&ChatMessage>` (see
+/// `impl From` block below).
+#[derive(Debug, Clone)]
+pub struct MessageSnapshot {
+    pub role: String,
+    pub content: String,
+}
+
+/// Owned snapshot of a tool definition, used by observability events to
+/// carry the tool list registered for an LLM call. Constructed via
+/// `From<&ToolSpec>`.
+#[derive(Debug, Clone)]
+pub struct ToolSpecSnapshot {
+    pub name: String,
+    pub description: String,
+    /// JSON schema for the tool's parameters, serialized as a string so the
+    /// observability layer doesn't need a `serde_json` dependency at the
+    /// trait boundary. Observers that need the structured form can re-parse.
+    pub parameters_json: String,
+}
+
+/// Owned snapshot of a tool call requested by the LLM, used by observability
+/// events to surface what the model asked the agent to invoke. Constructed
+/// via `From<&ToolCall>`.
+#[derive(Debug, Clone)]
+pub struct ToolCallSnapshot {
+    pub id: String,
+    pub name: String,
+    /// Tool arguments as a JSON string (already serialized by the provider).
+    pub arguments_json: String,
+}
+
 /// Discrete events emitted by the agent runtime for observability.
 ///
 /// Each variant represents a lifecycle event that observers can record,
-/// aggregate, or forward to external monitoring systems. Events carry
-/// just enough context for tracing and diagnostics without exposing
-/// sensitive prompt or response content.
+/// aggregate, or forward to external monitoring systems. As of Tier 2, LLM
+/// events carry full payloads (system prompt, input/output messages, tool
+/// definitions, tool call args/results) so OTel exporters can emit the
+/// `gen_ai.*` semantic-convention attributes Langfuse and other LLM-aware
+/// backends recognize.
 #[derive(Debug, Clone)]
 pub enum ObserverEvent {
     /// The agent orchestration loop has started a new session.
     AgentStart { provider: String, model: String },
     /// A request is about to be sent to an LLM provider.
     ///
-    /// This is emitted immediately before a provider call so observers can print
-    /// user-facing progress without leaking prompt contents.
+    /// Emitted immediately before a provider call. Stays minimal — observers
+    /// that want the full request/response payload should use `LlmResponse`,
+    /// which carries both sides of the call so a single span can be built
+    /// post-hoc with both input and output attached.
     LlmRequest {
         provider: String,
         model: String,
         messages_count: usize,
     },
     /// Result of a single LLM provider call.
+    ///
+    /// As of Tier 2, carries the **full** request and response payload so
+    /// OTel exporters can build a single span with both `gen_ai.input.*` and
+    /// `gen_ai.output.*` semantic-convention attributes. The agent loop
+    /// captures the input snapshots immediately before the provider call and
+    /// passes them through here alongside the response.
     LlmResponse {
         provider: String,
         model: String,
         duration: Duration,
         success: bool,
         error_message: Option<String>,
+        // ── Input side (snapshot taken before the call) ────────────
+        /// System prompt content extracted from the conversation history.
+        /// `None` when no `role=system` message is present.
+        system_prompt: Option<String>,
+        /// Full input message snapshots in send order. Includes the system
+        /// message if present (so observers see exactly what the provider
+        /// received). Empty for callers that don't have a history list
+        /// available (e.g. the gateway single-shot path).
+        input_messages: Vec<MessageSnapshot>,
+        /// Tool definitions registered with this call. Empty when the agent
+        /// is in non-tool mode or the caller has no tool registry in scope.
+        tool_definitions: Vec<ToolSpecSnapshot>,
+        // ── Output side (from the provider response) ───────────────
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        /// Tokens read from the provider's prompt cache (Anthropic
+        /// `cache_read_input_tokens`). When the system prompt and tools are
+        /// cached, the bulk of the prompt budget shows up here, NOT in
+        /// `input_tokens`. Observers should sum all three to get the true
+        /// total prompt token count.
+        cache_read_input_tokens: Option<u64>,
+        /// Tokens written to the provider's prompt cache on this call
+        /// (Anthropic `cache_creation_input_tokens`). Non-zero on the first
+        /// call that primes the cache; usually zero on subsequent calls.
+        cache_creation_input_tokens: Option<u64>,
+        /// Assistant text response. May be empty when the model returned only
+        /// tool calls. `None` on failure.
+        output_text: Option<String>,
+        /// Tool calls the model requested in this response. Empty when the
+        /// model returned only text or when the call failed.
+        output_tool_calls: Vec<ToolCallSnapshot>,
     },
     /// The agent session has finished.
     ///
@@ -42,13 +115,31 @@ pub enum ObserverEvent {
     /// A tool call is about to be executed.
     ToolCallStart {
         tool: String,
+        /// Tool call ID assigned by the LLM (e.g. `toolu_01...` for Anthropic
+        /// or the OpenAI tool_call_id). Used to correlate ToolCallStart with
+        /// the corresponding LlmRequest's `output_tool_calls`. `None` for
+        /// legacy non-native callers.
+        tool_call_id: Option<String>,
+        /// Full tool call arguments as a JSON string (no truncation as of
+        /// Tier 2). Observers that don't want to persist the full payload
+        /// can hash or truncate locally.
         arguments: Option<String>,
     },
     /// A tool call has completed with a success/failure outcome.
     ToolCall {
         tool: String,
+        tool_call_id: Option<String>,
         duration: Duration,
         success: bool,
+        /// Full tool call arguments JSON (duplicated from ToolCallStart so
+        /// observers that build a single span from this event get both sides
+        /// without needing observer state).
+        arguments: Option<String>,
+        /// Full tool call result body. `None` when the tool returned no
+        /// output (rare) or when the executor's outcome was not yet
+        /// available (handler should treat as empty). Already passed
+        /// through `scrub_credentials` by the caller.
+        result: Option<String>,
     },
     /// The agent produced a final answer for the current user message.
     TurnComplete,
@@ -113,6 +204,44 @@ pub enum ObserverEvent {
     },
     /// Recovery from a failed deployment has completed.
     RecoveryCompleted { deploy_id: String },
+}
+
+// ── Snapshot conversions ──────────────────────────────────────────────
+//
+// These `From` impls let agent loop call sites build owned snapshots from
+// borrowed provider types in a single `.iter().map(Into::into).collect()`
+// expression. The conversions are intentionally located in this crate (not
+// in `providers/`) so the observability layer is the *consumer* and the
+// providers crate has no dependency on `observability`.
+
+impl From<&crate::providers::traits::ChatMessage> for MessageSnapshot {
+    fn from(msg: &crate::providers::traits::ChatMessage) -> Self {
+        Self {
+            role: msg.role.clone(),
+            content: msg.content.clone(),
+        }
+    }
+}
+
+impl From<&crate::tools::ToolSpec> for ToolSpecSnapshot {
+    fn from(spec: &crate::tools::ToolSpec) -> Self {
+        Self {
+            name: spec.name.clone(),
+            description: spec.description.clone(),
+            parameters_json: serde_json::to_string(&spec.parameters)
+                .unwrap_or_else(|_| "{}".to_string()),
+        }
+    }
+}
+
+impl From<&crate::providers::traits::ToolCall> for ToolCallSnapshot {
+    fn from(call: &crate::providers::traits::ToolCall) -> Self {
+        Self {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments_json: call.arguments.clone(),
+        }
+    }
 }
 
 /// Numeric metrics emitted by the agent runtime.

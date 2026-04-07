@@ -11,7 +11,6 @@ use tokio_util::sync::CancellationToken;
 use crate::approval::ApprovalManager;
 use crate::observability::{Observer, ObserverEvent};
 use crate::tools::Tool;
-use crate::util::truncate_with_ellipsis;
 
 // Items that still live in `loop_` — import via the parent module.
 use super::loop_::{ParsedToolCall, ToolLoopCancelled, scrub_credentials};
@@ -37,15 +36,19 @@ pub(crate) struct ToolExecutionOutcome {
 pub(crate) async fn execute_one_tool(
     call_name: &str,
     call_arguments: serde_json::Value,
+    tool_call_id: Option<&str>,
     tools_registry: &[Box<dyn Tool>],
     activated_tools: Option<&std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
     observer: &dyn Observer,
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<ToolExecutionOutcome> {
-    let args_summary = truncate_with_ellipsis(&call_arguments.to_string(), 300);
+    // Tier 2: pass full tool arguments JSON to the observer (no truncation).
+    // Storage caps live downstream (Clickhouse TTL in Langfuse).
+    let full_args = call_arguments.to_string();
     observer.record_event(&ObserverEvent::ToolCallStart {
         tool: call_name.to_string(),
-        arguments: Some(args_summary),
+        tool_call_id: tool_call_id.map(str::to_string),
+        arguments: Some(full_args.clone()),
     });
     let start = Instant::now();
 
@@ -60,8 +63,11 @@ pub(crate) async fn execute_one_tool(
         let duration = start.elapsed();
         observer.record_event(&ObserverEvent::ToolCall {
             tool: call_name.to_string(),
+            tool_call_id: tool_call_id.map(str::to_string),
             duration,
             success: false,
+            arguments: Some(full_args.clone()),
+            result: Some(scrub_credentials(&reason)),
         });
         return Ok(ToolExecutionOutcome {
             output: reason.clone(),
@@ -84,14 +90,18 @@ pub(crate) async fn execute_one_tool(
     match tool_result {
         Ok(r) => {
             let duration = start.elapsed();
+            let scrubbed_output = scrub_credentials(&r.output);
             observer.record_event(&ObserverEvent::ToolCall {
                 tool: call_name.to_string(),
+                tool_call_id: tool_call_id.map(str::to_string),
                 duration,
                 success: r.success,
+                arguments: Some(full_args.clone()),
+                result: Some(scrubbed_output.clone()),
             });
             if r.success {
                 Ok(ToolExecutionOutcome {
-                    output: scrub_credentials(&r.output),
+                    output: scrubbed_output,
                     success: true,
                     error_reason: None,
                     duration,
@@ -108,12 +118,15 @@ pub(crate) async fn execute_one_tool(
         }
         Err(e) => {
             let duration = start.elapsed();
+            let reason = format!("Error executing {call_name}: {e}");
             observer.record_event(&ObserverEvent::ToolCall {
                 tool: call_name.to_string(),
+                tool_call_id: tool_call_id.map(str::to_string),
                 duration,
                 success: false,
+                arguments: Some(full_args.clone()),
+                result: Some(scrub_credentials(&reason)),
             });
-            let reason = format!("Error executing {call_name}: {e}");
             Ok(ToolExecutionOutcome {
                 output: reason.clone(),
                 success: false,
@@ -168,6 +181,7 @@ pub(crate) async fn execute_tools_parallel(
             execute_one_tool(
                 &call.name,
                 call.arguments.clone(),
+                call.tool_call_id.as_deref(),
                 tools_registry,
                 activated_tools,
                 observer,
@@ -196,6 +210,7 @@ pub(crate) async fn execute_tools_sequential(
             execute_one_tool(
                 &call.name,
                 call.arguments.clone(),
+                call.tool_call_id.as_deref(),
                 tools_registry,
                 activated_tools,
                 observer,

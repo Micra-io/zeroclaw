@@ -200,6 +200,8 @@ impl ClaudeCodeProvider {
                     input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()),
                     output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
                     cached_input_tokens: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
+                    cache_read_input_tokens: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
+                    cache_creation_input_tokens: u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
                 });
 
                 return Ok((text, usage));

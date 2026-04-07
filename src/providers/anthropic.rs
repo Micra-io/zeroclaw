@@ -572,6 +572,9 @@ impl AnthropicProvider {
         let usage = response.usage.map(|u| {
             // Combine cache_creation + cache_read into cached_input_tokens
             // so cost tracking sees the full picture of cached prompt tokens.
+            // Also preserve the granular breakdown so observability layers
+            // (e.g. OtelObserver) can emit gen_ai.usage.cache_read_input_tokens
+            // and gen_ai.usage.cache_creation_input_tokens separately.
             let cached = match (u.cache_creation_input_tokens, u.cache_read_input_tokens) {
                 (Some(a), Some(b)) => Some(a.saturating_add(b)),
                 (Some(a), None) => Some(a),
@@ -582,6 +585,8 @@ impl AnthropicProvider {
                 input_tokens: u.input_tokens,
                 output_tokens: u.output_tokens,
                 cached_input_tokens: cached,
+                cache_read_input_tokens: u.cache_read_input_tokens,
+                cache_creation_input_tokens: u.cache_creation_input_tokens,
             }
         });
 
@@ -695,11 +700,25 @@ impl AnthropicProvider {
                             .and_then(|m| m.get("usage"))
                             .and_then(|u| u.get("cache_read_input_tokens"))
                             .and_then(|t| t.as_u64());
+                        let cache_creation = event
+                            .get("message")
+                            .and_then(|m| m.get("usage"))
+                            .and_then(|u| u.get("cache_creation_input_tokens"))
+                            .and_then(|t| t.as_u64());
+                        // Combined sum kept for backward-compat with cost tracker.
+                        let cached_combined = match (cache_creation, cache_read) {
+                            (Some(a), Some(b)) => Some(a.saturating_add(b)),
+                            (Some(a), None) => Some(a),
+                            (None, Some(b)) => Some(b),
+                            (None, None) => None,
+                        };
                         let _ = tx
                             .send(Ok(StreamEvent::Usage(TokenUsage {
                                 input_tokens: Some(input_tokens),
                                 output_tokens: None,
-                                cached_input_tokens: cache_read,
+                                cached_input_tokens: cached_combined,
+                                cache_read_input_tokens: cache_read,
+                                cache_creation_input_tokens: cache_creation,
                             })))
                             .await;
                     }
@@ -808,6 +827,7 @@ impl AnthropicProvider {
                                 input_tokens: None,
                                 output_tokens: Some(output_tokens),
                                 cached_input_tokens: None,
+                                ..Default::default()
                             })))
                             .await;
                     }
