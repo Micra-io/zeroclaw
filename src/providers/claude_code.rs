@@ -241,10 +241,10 @@ impl Provider for ClaudeCodeProvider {
     ) -> anyhow::Result<String> {
         Self::validate_temperature(temperature)?;
 
-        let system = messages
+        let system_owned = messages
             .iter()
             .find(|m| m.role == "system")
-            .map(|m| m.content.as_str());
+            .map(ChatMessage::concatenated_content);
 
         let turns: Vec<&ChatMessage> = messages.iter().filter(|m| m.role != "system").collect();
 
@@ -264,7 +264,9 @@ impl Provider for ClaudeCodeProvider {
             parts.join("\n\n")
         };
 
-        let (text, _usage) = self.invoke_cli(&user_message, model, system, true).await?;
+        let (text, _usage) = self
+            .invoke_cli(&user_message, model, system_owned.as_deref(), true)
+            .await?;
         Ok(text)
     }
 
@@ -276,11 +278,11 @@ impl Provider for ClaudeCodeProvider {
     ) -> anyhow::Result<ChatResponse> {
         Self::validate_temperature(temperature)?;
 
-        let system = request
+        let system_owned = request
             .messages
             .iter()
             .find(|m| m.role == "system")
-            .map(|m| m.content.as_str());
+            .map(ChatMessage::concatenated_content);
 
         let turns: Vec<&ChatMessage> = request
             .messages
@@ -304,7 +306,9 @@ impl Provider for ClaudeCodeProvider {
             parts.join("\n\n")
         };
 
-        let (text, usage) = self.invoke_cli(&user_message, model, system, true).await?;
+        let (text, usage) = self
+            .invoke_cli(&user_message, model, system_owned.as_deref(), true)
+            .await?;
 
         Ok(ChatResponse {
             text: Some(text),

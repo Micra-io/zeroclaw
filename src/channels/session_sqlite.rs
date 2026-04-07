@@ -141,6 +141,7 @@ impl SqliteSessionBackend {
                 message: ChatMessage {
                     role: row.get(0)?,
                     content: row.get(1)?,
+                    stable_prefix: None,
                 },
                 created_at: row.get(2)?,
             })
@@ -176,6 +177,7 @@ impl SqliteSessionBackend {
                 message: ChatMessage {
                     role: row.get(0)?,
                     content: row.get(1)?,
+                    stable_prefix: None,
                 },
                 created_at: row.get(2)?,
             })
@@ -257,6 +259,7 @@ impl SessionBackend for SqliteSessionBackend {
             Ok(ChatMessage {
                 role: row.get(0)?,
                 content: row.get(1)?,
+                stable_prefix: None,
             })
         }) {
             Ok(r) => r,
@@ -282,6 +285,7 @@ impl SessionBackend for SqliteSessionBackend {
             Ok(ChatMessage {
                 role: row.get(0)?,
                 content: row.get(1)?,
+                stable_prefix: None,
             })
         }) {
             Ok(r) => r,

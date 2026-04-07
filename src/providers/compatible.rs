@@ -296,7 +296,7 @@ impl OpenAiCompatibleProvider {
         let system_content: String = messages
             .iter()
             .filter(|m| m.role == "system")
-            .map(|m| m.content.as_str())
+            .map(ChatMessage::concatenated_content)
             .collect::<Vec<_>>()
             .join("\n\n");
 
@@ -1267,12 +1267,15 @@ fn build_responses_prompt(messages: &[ChatMessage]) -> (Option<String>, Vec<Resp
     let mut input = Vec::new();
 
     for message in messages {
-        if message.content.trim().is_empty() {
+        if message.role == "system" {
+            let full = message.concatenated_content();
+            if !full.trim().is_empty() {
+                instructions_parts.push(full);
+            }
             continue;
         }
 
-        if message.role == "system" {
-            instructions_parts.push(message.content.clone());
+        if message.content.trim().is_empty() {
             continue;
         }
 

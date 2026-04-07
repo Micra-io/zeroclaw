@@ -600,7 +600,7 @@ impl BedrockProvider {
                 "system" => {
                     if system_blocks.is_empty() {
                         system_blocks.push(SystemBlock::Text(TextBlock {
-                            text: msg.content.clone(),
+                            text: msg.concatenated_content(),
                         }));
                     }
                 }

@@ -390,7 +390,19 @@ struct ChannelRuntimeContext {
     memory: Arc<dyn Memory>,
     tools_registry: Arc<Vec<Box<dyn Tool>>>,
     observer: Arc<dyn Observer>,
+    /// Legacy flat system prompt — kept for backward compatibility with
+    /// callsites and tests that still expect a single concatenated string.
+    /// New code paths should prefer `stable_system_prefix` (the cache-
+    /// friendly prefix that lives in front of the Anthropic cache
+    /// breakpoint) and rebuild the dynamic block per turn via
+    /// [`build_dynamic_system_block`].
     system_prompt: Arc<String>,
+    /// Cache-friendly system prompt prefix (identity, tools, safety,
+    /// skills, workspace, bootstrap, tool instructions, deferred MCP
+    /// names). When present, [`process_channel_message`] sends it as the
+    /// first `SystemBlock` with `cache_control: ephemeral` so the
+    /// Anthropic prefix cache survives across turns and channels.
+    stable_system_prefix: Arc<String>,
     model: Arc<String>,
     temperature: f64,
     auto_save_memory: bool,
@@ -665,31 +677,40 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
     }
 }
 
+/// Build the per-turn dynamic system block: `## Current Date & Time`
+/// followed by `## Runtime`. This is the byte-volatile portion of the
+/// system prompt that lives **after** the Anthropic cache breakpoint, so
+/// the stable prefix (identity, tools, safety, skills, bootstrap) can be
+/// served from the prefix cache while the timestamps and runtime info
+/// are re-sent on every call.
+fn build_dynamic_system_block(model: &str) -> String {
+    let now = chrono::Local::now();
+    let host =
+        hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
+    format!(
+        "## Current Date & Time\n\n{} ({})\n\n## Runtime\n\nHost: {host} | OS: {} | Model: {model}\n",
+        now.format("%Y-%m-%d %H:%M:%S"),
+        now.format("%Z"),
+        std::env::consts::OS,
+    )
+}
+
+/// Append channel-specific instructions and a per-conversation
+/// `Channel context: ...` footer to a system prompt body. Used by
+/// [`process_channel_message`] to decorate the per-turn dynamic block
+/// with delivery instructions for the active channel.
+///
+/// Note: this function used to also rewrite the stale `## Current Date &
+/// Time` substring inside a cached monolithic prompt. That responsibility
+/// now lives in [`build_dynamic_system_block`], which produces a fresh
+/// timestamp on every call — so the in-place `replace_range` scan is no
+/// longer needed and has been removed.
 fn build_channel_system_prompt(
     base_prompt: &str,
     channel_name: &str,
     reply_target: &str,
 ) -> String {
     let mut prompt = base_prompt.to_string();
-
-    // Refresh the stale datetime in the cached system prompt
-    {
-        let now = chrono::Local::now();
-        let fresh = format!(
-            "## Current Date & Time\n\n{} ({})\n",
-            now.format("%Y-%m-%d %H:%M:%S"),
-            now.format("%Z"),
-        );
-        if let Some(start) = prompt.find("## Current Date & Time\n\n") {
-            // Find the end of this section (next "## " heading or end of string)
-            let rest = &prompt[start + 24..]; // skip past "## Current Date & Time\n\n"
-            let section_end = rest
-                .find("\n## ")
-                .map(|i| start + 24 + i)
-                .unwrap_or(prompt.len());
-            prompt.replace_range(start..section_end, fresh.trim_end());
-        }
-    }
 
     if let Some(instructions) = channel_delivery_instructions(channel_name) {
         if prompt.is_empty() {
@@ -1225,6 +1246,40 @@ fn refreshed_new_session_system_prompt(ctx: &ChannelRuntimeContext) -> String {
         ctx.prompt_config.skills.prompt_injection_mode,
     );
     replace_available_skills_section(ctx.system_prompt.as_str(), &refreshed_skills)
+}
+
+/// Split-aware variant of [`refreshed_new_session_system_prompt`].
+/// Returns `(stable, dynamic)` so the caller can build a two-block
+/// system message that survives the Anthropic prefix cache.
+///
+/// The `stable` half is the cached `ctx.stable_system_prefix` with the
+/// `## Available Skills` section replaced for the new session (skills
+/// can change when the user runs `/new`). The `dynamic` half is a fresh
+/// `## Current Date & Time` + `## Runtime` block with `now`.
+fn refreshed_new_session_system_prompt_parts(
+    ctx: &ChannelRuntimeContext,
+) -> (String, String) {
+    let refreshed_skills = crate::skills::skills_to_prompt_with_mode(
+        &crate::skills::load_skills_with_config(
+            ctx.workspace_dir.as_ref(),
+            ctx.prompt_config.as_ref(),
+        ),
+        ctx.workspace_dir.as_ref(),
+        ctx.prompt_config.skills.prompt_injection_mode,
+    );
+    let stable = if ctx.stable_system_prefix.is_empty() {
+        // No split available (legacy test fixtures): refresh skills on
+        // the flat prompt and let the caller fall back to the legacy
+        // monolithic path.
+        replace_available_skills_section(ctx.system_prompt.as_str(), &refreshed_skills)
+    } else {
+        replace_available_skills_section(
+            ctx.stable_system_prefix.as_str(),
+            &refreshed_skills,
+        )
+    };
+    let dynamic = build_dynamic_system_block(ctx.model.as_str());
+    (stable, dynamic)
 }
 
 fn compact_sender_history(ctx: &ChannelRuntimeContext, sender_key: &str) -> bool {
@@ -2836,18 +2891,42 @@ async fn process_channel_message(
         format!("{sender_memory}\n{group_memory}")
     };
 
-    // Use refreshed system prompt for new sessions (master's /new support),
-    // and inject memory into system prompt (not user message) so it
-    // doesn't pollute session history and is re-fetched each turn.
-    let base_system_prompt = if had_prior_history {
-        ctx.system_prompt.as_str().to_string()
+    // Build the system message as a stable/dynamic split so the
+    // Anthropic prefix cache survives across turns. The stable prefix is
+    // the daemon-startup cache (or, on a new session, the same cache
+    // with the `## Available Skills` block refreshed). The dynamic
+    // block is rebuilt every turn from `## Current Date & Time` +
+    // `## Runtime` and gets per-turn tail content (channel delivery
+    // instructions, channel context, memory recall, group context).
+    let split_active = !ctx.stable_system_prefix.is_empty();
+    let (stable_prefix, mut dynamic_block) = if had_prior_history {
+        if split_active {
+            (
+                ctx.stable_system_prefix.as_str().to_string(),
+                build_dynamic_system_block(ctx.model.as_str()),
+            )
+        } else {
+            // Legacy path used by test fixtures that left
+            // `stable_system_prefix` empty: fall back to the flat
+            // `ctx.system_prompt` and feed it through the old
+            // single-block construction below.
+            (String::new(), ctx.system_prompt.as_str().to_string())
+        }
+    } else if split_active {
+        refreshed_new_session_system_prompt_parts(ctx.as_ref())
     } else {
-        refreshed_new_session_system_prompt(ctx.as_ref())
+        (String::new(), refreshed_new_session_system_prompt(ctx.as_ref()))
     };
-    let mut system_prompt =
-        build_channel_system_prompt(&base_system_prompt, &msg.channel, &msg.reply_target);
+
+    // The dynamic block carries everything that varies per turn:
+    // channel delivery instructions, channel context, memory recall,
+    // and (conditionally) group context. Decorating only the dynamic
+    // block keeps the stable prefix byte-identical across turns so the
+    // Anthropic cache breakpoint actually hits.
+    dynamic_block =
+        build_channel_system_prompt(&dynamic_block, &msg.channel, &msg.reply_target);
     if !memory_context.is_empty() {
-        let _ = write!(system_prompt, "\n\n{memory_context}");
+        let _ = write!(dynamic_block, "\n\n{memory_context}");
     }
     // ── Group context injection ──────────────────────────────────
     // For group mentions, inject recent non-mention messages from the
@@ -2870,12 +2949,18 @@ async fn process_channel_message(
                         group_jid = %msg.reply_target,
                         "Injecting group context into system prompt"
                     );
-                    let _ = write!(system_prompt, "\n\n{group_context}");
+                    let _ = write!(dynamic_block, "\n\n{group_context}");
                 }
             }
         }
     }
-    let mut history = vec![ChatMessage::system(system_prompt)];
+
+    let system_message = if split_active {
+        ChatMessage::system_with_stable_prefix(stable_prefix, dynamic_block)
+    } else {
+        ChatMessage::system(dynamic_block)
+    };
+    let mut history = vec![system_message];
     history.extend(prior_turns);
 
     // ── Proactive context compression ────────────────────────────
@@ -2911,9 +2996,15 @@ async fn process_channel_message(
     }
 
     // ── Reply-intent precheck ────────────────────────────────────────
+    // Use the concatenated stable+dynamic view here so the classifier
+    // sees the full system context, not just the per-turn dynamic
+    // block. Must materialize an owned String first because
+    // `concatenated_content` allocates and the borrow needs to outlive
+    // the await.
+    let classifier_system_prompt = history[0].concatenated_content();
     let reply_intent = classify_channel_reply_intent(
         active_provider.as_ref(),
-        history[0].content.as_str(),
+        classifier_system_prompt.as_str(),
         &history,
         route.model.as_str(),
         runtime_defaults.temperature,
@@ -3942,7 +4033,44 @@ pub fn build_system_prompt_with_mode(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn build_system_prompt_with_mode_and_autonomy(
+/// System prompt split into a cache-friendly stable prefix and a per-call
+/// dynamic suffix.
+///
+/// The stable block contains identity, tools, safety, skills, workspace, and
+/// bootstrap files — bytes that rarely change within a session and should be
+/// served from the Anthropic prompt cache. The dynamic block contains
+/// Channel Capabilities, Current Date & Time, and Runtime info — bytes that
+/// would invalidate the cache if they were placed before the breakpoint.
+///
+/// Providers that support multi-block system prompts (Anthropic) emit the
+/// two blocks separately with `cache_control` on the stable block only.
+/// Providers without multi-block support concatenate the two strings via
+/// [`SystemPromptParts::into_single_string`] so the on-wire byte layout is
+/// unchanged from the pre-split behaviour.
+#[derive(Debug, Clone, Default)]
+pub struct SystemPromptParts {
+    pub stable: String,
+    pub dynamic: String,
+}
+
+impl SystemPromptParts {
+    /// Concatenate `stable` and `dynamic` into a single string, matching the
+    /// byte layout used by the legacy single-string builder.
+    pub fn into_single_string(self) -> String {
+        if self.stable.is_empty() {
+            self.dynamic
+        } else if self.dynamic.is_empty() {
+            self.stable
+        } else {
+            format!("{}\n{}", self.stable.trim_end_matches('\n'), self.dynamic)
+        }
+    }
+}
+
+/// Build the full system prompt split into a stable prefix and a dynamic
+/// suffix. See [`SystemPromptParts`] for the caching rationale.
+#[allow(clippy::too_many_arguments)]
+pub fn build_system_prompt_parts_with_mode_and_autonomy(
     workspace_dir: &std::path::Path,
     model_name: &str,
     tools: &[(&str, &str)],
@@ -3954,12 +4082,12 @@ pub fn build_system_prompt_with_mode_and_autonomy(
     skills_prompt_mode: crate::config::SkillsPromptInjectionMode,
     compact_context: bool,
     max_system_prompt_chars: usize,
-) -> String {
+) -> SystemPromptParts {
     use std::fmt::Write;
-    let mut prompt = String::with_capacity(8192);
+    let mut stable = String::with_capacity(8192);
 
     // ── 0. Anti-narration (top priority) ───────────────────────
-    prompt.push_str(
+    stable.push_str(
         "## CRITICAL: No Tool Narration\n\n\
          NEVER narrate, announce, describe, or explain your tool usage to the user. \
          Do NOT say things like 'Let me check...', 'I will use http_request to...', \
@@ -3970,7 +4098,7 @@ pub fn build_system_prompt_with_mode_and_autonomy(
     );
 
     // ── 0b. Tool Honesty ───────────────────────────────────────
-    prompt.push_str(
+    stable.push_str(
         "## CRITICAL: Tool Honesty\n\n\
          - NEVER fabricate, invent, or guess tool results. If a tool returns empty results, say \"No results found.\"\n\
          - If a tool call fails, report the error — never make up data to fill the gap.\n\
@@ -3979,19 +4107,19 @@ pub fn build_system_prompt_with_mode_and_autonomy(
 
     // ── 1. Tooling ──────────────────────────────────────────────
     if !tools.is_empty() {
-        prompt.push_str("## Tools\n\n");
+        stable.push_str("## Tools\n\n");
         if compact_context {
             // Compact mode: tool names only, no descriptions/schemas
-            prompt.push_str("Available tools: ");
+            stable.push_str("Available tools: ");
             let names: Vec<&str> = tools.iter().map(|(name, _)| *name).collect();
-            prompt.push_str(&names.join(", "));
-            prompt.push_str("\n\n");
+            stable.push_str(&names.join(", "));
+            stable.push_str("\n\n");
         } else {
-            prompt.push_str("You have access to the following tools:\n\n");
+            stable.push_str("You have access to the following tools:\n\n");
             for (name, desc) in tools {
-                let _ = writeln!(prompt, "- **{name}**: {desc}");
+                let _ = writeln!(stable, "- **{name}**: {desc}");
             }
-            prompt.push('\n');
+            stable.push('\n');
         }
     }
 
@@ -4006,7 +4134,7 @@ pub fn build_system_prompt_with_mode_and_autonomy(
             || *name == "hardware_capabilities"
     });
     if has_hardware {
-        prompt.push_str(
+        stable.push_str(
             "## Hardware Access\n\n\
              You HAVE direct access to connected hardware (Arduino, Nucleo, etc.). The user owns this system and has configured it.\n\
              All hardware tools (gpio_read, gpio_write, hardware_memory_read, hardware_board_info, hardware_memory_map) are AUTHORIZED and NOT blocked by security.\n\
@@ -4018,14 +4146,14 @@ pub fn build_system_prompt_with_mode_and_autonomy(
 
     // ── 1c. Action instruction (avoid meta-summary) ───────────────
     if native_tools {
-        prompt.push_str(
+        stable.push_str(
             "## Your Task\n\n\
              When the user sends a message, respond naturally. Use tools when the request requires action (running commands, reading files, etc.).\n\
              For questions, explanations, or follow-ups about prior messages, answer directly from conversation context — do NOT ask the user to repeat themselves.\n\
              Do NOT: summarize this configuration, describe your capabilities, or output step-by-step meta-commentary.\n\n",
         );
     } else {
-        prompt.push_str(
+        stable.push_str(
             "## Your Task\n\n\
              When the user sends a message, ACT on it. Use the tools to fulfill their request.\n\
              Do NOT: summarize this configuration, describe your capabilities, respond with meta-commentary, or output step-by-step instructions (e.g. \"1. First... 2. Next...\").\n\
@@ -4034,16 +4162,16 @@ pub fn build_system_prompt_with_mode_and_autonomy(
     }
 
     // ── 2. Safety ───────────────────────────────────────────────
-    prompt.push_str("## Safety\n\n");
-    prompt.push_str("- Do not exfiltrate private data.\n");
+    stable.push_str("## Safety\n\n");
+    stable.push_str("- Do not exfiltrate private data.\n");
     if autonomy_config.map(|cfg| cfg.level) != Some(crate::security::AutonomyLevel::Full) {
-        prompt.push_str(
+        stable.push_str(
             "- Do not run destructive commands without asking.\n\
              - Do not bypass oversight or approval mechanisms.\n",
         );
     }
-    prompt.push_str("- Prefer `trash` over `rm` (recoverable beats gone forever).\n");
-    prompt.push_str(match autonomy_config.map(|cfg| cfg.level) {
+    stable.push_str("- Prefer `trash` over `rm` (recoverable beats gone forever).\n");
+    stable.push_str(match autonomy_config.map(|cfg| cfg.level) {
         Some(crate::security::AutonomyLevel::Full) => {
             "- Respect the runtime autonomy policy: if a tool or action is allowed, execute it directly instead of asking the user for extra approval.\n\
              - If a tool or action is blocked by policy or unavailable, explain that concrete restriction instead of simulating an approval dialog.\n"
@@ -4058,27 +4186,27 @@ pub fn build_system_prompt_with_mode_and_autonomy(
              - If a tool or action is blocked by policy or unavailable, explain that concrete restriction instead of simulating an approval dialog.\n"
         }
     });
-    prompt.push('\n');
+    stable.push('\n');
 
     // ── 3. Skills (full or compact, based on config) ─────────────
     if !skills.is_empty() {
-        prompt.push_str(&crate::skills::skills_to_prompt_with_mode(
+        stable.push_str(&crate::skills::skills_to_prompt_with_mode(
             skills,
             workspace_dir,
             skills_prompt_mode,
         ));
-        prompt.push_str("\n\n");
+        stable.push_str("\n\n");
     }
 
     // ── 4. Workspace ────────────────────────────────────────────
     let _ = writeln!(
-        prompt,
+        stable,
         "## Workspace\n\nWorking directory: `{}`\n",
         workspace_dir.display()
     );
 
     // ── 5. Bootstrap files (injected into context) ──────────────
-    prompt.push_str("## Project Context\n\n");
+    stable.push_str("## Project Context\n\n");
 
     // Check if AIEOS identity is configured
     if let Some(config) = identity_config {
@@ -4088,15 +4216,15 @@ pub fn build_system_prompt_with_mode_and_autonomy(
                 Ok(Some(aieos_identity)) => {
                     let aieos_prompt = identity::aieos_to_system_prompt(&aieos_identity);
                     if !aieos_prompt.is_empty() {
-                        prompt.push_str(&aieos_prompt);
-                        prompt.push_str("\n\n");
+                        stable.push_str(&aieos_prompt);
+                        stable.push_str("\n\n");
                     }
                 }
                 Ok(None) => {
                     // No AIEOS identity loaded (shouldn't happen if is_aieos_configured returned true)
                     // Fall back to OpenClaw bootstrap files
                     let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-                    load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
+                    load_openclaw_bootstrap_files(&mut stable, workspace_dir, max_chars);
                 }
                 Err(e) => {
                     // Log error but don't fail - fall back to OpenClaw
@@ -4104,45 +4232,48 @@ pub fn build_system_prompt_with_mode_and_autonomy(
                         "Warning: Failed to load AIEOS identity: {e}. Using OpenClaw format."
                     );
                     let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-                    load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
+                    load_openclaw_bootstrap_files(&mut stable, workspace_dir, max_chars);
                 }
             }
         } else {
             // OpenClaw format
             let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-            load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
+            load_openclaw_bootstrap_files(&mut stable, workspace_dir, max_chars);
         }
     } else {
         // No identity config - use OpenClaw format
         let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-        load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
+        load_openclaw_bootstrap_files(&mut stable, workspace_dir, max_chars);
     }
 
-    // ── 6. Date & Time ──────────────────────────────────────────
-    let now = chrono::Local::now();
-    let _ = writeln!(
-        prompt,
-        "## Current Date & Time\n\n{} ({})\n",
-        now.format("%Y-%m-%d %H:%M:%S"),
-        now.format("%Z")
-    );
+    // ── Truncation (max_system_prompt_chars budget) ────────────
+    // Applied to the stable block only. The dynamic suffix is tiny (<1KB)
+    // and must not be truncated because it carries Date & Time / Runtime
+    // context the model relies on for "today" questions.
+    if max_system_prompt_chars > 0 && stable.len() > max_system_prompt_chars {
+        // Truncate on a char boundary, keeping the top portion (identity + safety).
+        let mut end = max_system_prompt_chars;
+        // Ensure we don't split a multi-byte UTF-8 character.
+        while !stable.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        stable.truncate(end);
+        stable.push_str("\n\n[System prompt truncated to fit context budget]\n");
+    }
 
-    // ── 7. Runtime ──────────────────────────────────────────────
-    let host =
-        hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
-    let _ = writeln!(
-        prompt,
-        "## Runtime\n\nHost: {host} | OS: {} | Model: {model_name}\n",
-        std::env::consts::OS,
-    );
+    // ── Dynamic suffix ─────────────────────────────────────────
+    // Channel Capabilities, Date & Time, and Runtime change (or could
+    // change) per call and must live *after* the cache breakpoint so the
+    // stable prefix hash survives across invocations.
+    let mut dynamic = String::with_capacity(1024);
 
     // ── 8. Channel Capabilities (skipped in compact_context mode) ──
     if !compact_context {
-        prompt.push_str("## Channel Capabilities\n\n");
-        prompt.push_str("- You are running as a messaging bot. Your response is automatically sent back to the user's channel.\n");
-        prompt
+        dynamic.push_str("## Channel Capabilities\n\n");
+        dynamic.push_str("- You are running as a messaging bot. Your response is automatically sent back to the user's channel.\n");
+        dynamic
             .push_str("- You do NOT need to ask permission to respond — just respond directly.\n");
-        prompt.push_str(match autonomy_config.map(|cfg| cfg.level) {
+        dynamic.push_str(match autonomy_config.map(|cfg| cfg.level) {
         Some(crate::security::AutonomyLevel::Full) => {
             "- If the runtime policy already allows a tool, use it directly; do not ask the user for extra approval.\n\
              - Never pretend you are waiting for a human approval click or confirmation when the runtime policy already permits the action.\n\
@@ -4156,30 +4287,75 @@ pub fn build_system_prompt_with_mode_and_autonomy(
              - If there is no approval path for this channel or the runtime blocks an action, explain that restriction directly instead of simulating an approval flow.\n"
         }
     });
-        prompt.push_str("- NEVER repeat, describe, or echo credentials, tokens, API keys, or secrets in your responses.\n");
-        prompt.push_str("- If a tool output contains credentials, they have already been redacted — do not mention them.\n");
-        prompt.push_str("- When a user sends a voice note, it is automatically transcribed to text. Your text reply is automatically converted to a voice note and sent back. Do NOT attempt to generate audio yourself — TTS is handled by the channel.\n");
-        prompt.push_str("- NEVER narrate or describe your tool usage. Do NOT say 'Let me fetch...', 'I will use...', 'Searching...', or similar. Give the FINAL ANSWER only — no intermediate steps, no tool mentions, no progress updates.\n\n");
-    } // end if !compact_context (Channel Capabilities)
-
-    // ── 9. Truncation (max_system_prompt_chars budget) ──────────
-    if max_system_prompt_chars > 0 && prompt.len() > max_system_prompt_chars {
-        // Truncate on a char boundary, keeping the top portion (identity + safety).
-        let mut end = max_system_prompt_chars;
-        // Ensure we don't split a multi-byte UTF-8 character.
-        while !prompt.is_char_boundary(end) && end > 0 {
-            end -= 1;
-        }
-        prompt.truncate(end);
-        prompt.push_str("\n\n[System prompt truncated to fit context budget]\n");
+        dynamic.push_str("- NEVER repeat, describe, or echo credentials, tokens, API keys, or secrets in your responses.\n");
+        dynamic.push_str("- If a tool output contains credentials, they have already been redacted — do not mention them.\n");
+        dynamic.push_str("- When a user sends a voice note, it is automatically transcribed to text. Your text reply is automatically converted to a voice note and sent back. Do NOT attempt to generate audio yourself — TTS is handled by the channel.\n");
+        dynamic.push_str("- NEVER narrate or describe your tool usage. Do NOT say 'Let me fetch...', 'I will use...', 'Searching...', or similar. Give the FINAL ANSWER only — no intermediate steps, no tool mentions, no progress updates.\n\n");
     }
 
-    if prompt.is_empty() {
-        "You are ZeroClaw, a fast and efficient AI assistant built in Rust. Be helpful, concise, and direct."
-            .to_string()
-    } else {
-        prompt
+    // ── 6. Date & Time ──────────────────────────────────────────
+    let now = chrono::Local::now();
+    let _ = writeln!(
+        dynamic,
+        "## Current Date & Time\n\n{} ({})\n",
+        now.format("%Y-%m-%d %H:%M:%S"),
+        now.format("%Z")
+    );
+
+    // ── 7. Runtime ──────────────────────────────────────────────
+    let host =
+        hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
+    let _ = writeln!(
+        dynamic,
+        "## Runtime\n\nHost: {host} | OS: {} | Model: {model_name}\n",
+        std::env::consts::OS,
+    );
+
+    if stable.is_empty() && dynamic.is_empty() {
+        return SystemPromptParts {
+            stable: "You are ZeroClaw, a fast and efficient AI assistant built in Rust. Be helpful, concise, and direct.".to_string(),
+            dynamic: String::new(),
+        };
     }
+
+    SystemPromptParts { stable, dynamic }
+}
+
+/// Legacy single-string system prompt builder.
+///
+/// Thin wrapper around [`build_system_prompt_parts_with_mode_and_autonomy`]
+/// that concatenates the two parts for callers that still expect a single
+/// string. Exists so channel tests and non-agent callsites compile without
+/// changes; the daemon agent loop should call the parts version directly to
+/// preserve the cache breakpoint.
+#[allow(clippy::too_many_arguments)]
+pub fn build_system_prompt_with_mode_and_autonomy(
+    workspace_dir: &std::path::Path,
+    model_name: &str,
+    tools: &[(&str, &str)],
+    skills: &[crate::skills::Skill],
+    identity_config: Option<&crate::config::IdentityConfig>,
+    bootstrap_max_chars: Option<usize>,
+    autonomy_config: Option<&crate::config::AutonomyConfig>,
+    native_tools: bool,
+    skills_prompt_mode: crate::config::SkillsPromptInjectionMode,
+    compact_context: bool,
+    max_system_prompt_chars: usize,
+) -> String {
+    build_system_prompt_parts_with_mode_and_autonomy(
+        workspace_dir,
+        model_name,
+        tools,
+        skills,
+        identity_config,
+        bootstrap_max_chars,
+        autonomy_config,
+        native_tools,
+        skills_prompt_mode,
+        compact_context,
+        max_system_prompt_chars,
+    )
+    .into_single_string()
 }
 
 /// Inject a single workspace file into the prompt with truncation and missing-file markers.
@@ -5485,7 +5661,13 @@ pub async fn start_channels(config: Config) -> Result<()> {
         None
     };
     let native_tools = provider.supports_native_tools();
-    let mut system_prompt = build_system_prompt_with_mode_and_autonomy(
+    // Build the system prompt as a stable/dynamic split so the cache-
+    // friendly bytes (identity, tools, safety, skills, workspace,
+    // bootstrap, tool instructions, deferred MCP names) live in front of
+    // the Anthropic cache breakpoint. Per-call dynamic sections (Date &
+    // Time, Runtime, Channel Capabilities) are rebuilt per turn in
+    // `process_channel_message` via `build_dynamic_system_block`.
+    let mut parts = build_system_prompt_parts_with_mode_and_autonomy(
         &workspace,
         &model,
         &tool_descs,
@@ -5499,17 +5681,25 @@ pub async fn start_channels(config: Config) -> Result<()> {
         config.agent.max_system_prompt_chars,
     );
     if !native_tools {
-        system_prompt.push_str(&build_tool_instructions(
+        parts.stable.push_str(&build_tool_instructions(
             tools_registry.as_ref(),
             Some(&i18n_descs),
         ));
     }
 
-    // Append deferred MCP tool names so the LLM knows what is available
+    // Append deferred MCP tool names so the LLM knows what is available.
+    // These belong in the cached prefix (stable bytes within a daemon
+    // startup), not the per-turn dynamic block.
     if !deferred_section.is_empty() {
-        system_prompt.push('\n');
-        system_prompt.push_str(&deferred_section);
+        parts.stable.push('\n');
+        parts.stable.push_str(&deferred_section);
     }
+
+    // Materialize the legacy single-string view used by tests, the
+    // reply-intent classifier, and any callsite that still expects a
+    // flat `Arc<String>` system prompt.
+    let stable_system_prefix = parts.stable.clone();
+    let system_prompt = parts.into_single_string();
 
     if !skills.is_empty() {
         println!(
@@ -5667,6 +5857,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         tools_registry: Arc::clone(&tools_registry),
         observer,
         system_prompt: Arc::new(system_prompt),
+        stable_system_prefix: Arc::new(stable_system_prefix),
         model: Arc::new(model.clone()),
         temperature,
         auto_save_memory: config.memory.auto_save,
@@ -6149,6 +6340,7 @@ mod tests {
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("system".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -6272,6 +6464,7 @@ mod tests {
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("system".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -6356,6 +6549,7 @@ mod tests {
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("system".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -6455,6 +6649,7 @@ mod tests {
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("system".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7053,6 +7248,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7144,6 +7340,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7249,6 +7446,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7339,6 +7537,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7439,6 +7638,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7560,6 +7760,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7662,6 +7863,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7776,6 +7978,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("startup-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7881,6 +8084,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7976,6 +8180,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -8198,6 +8403,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -8311,6 +8517,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -8443,6 +8650,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -8572,6 +8780,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -8679,6 +8888,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -8767,6 +8977,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -8854,6 +9065,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -9647,6 +9859,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -9789,6 +10002,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new(initial_system_prompt),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -9974,6 +10188,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -10093,6 +10308,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -10679,6 +10895,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("You are a helpful assistant.".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -10776,6 +10993,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("You are a helpful assistant.".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -10907,6 +11125,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("You are a helpful assistant.".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -11082,6 +11301,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -11203,6 +11423,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -11316,6 +11537,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -11449,6 +11671,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -11725,6 +11948,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -11994,6 +12218,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -12111,6 +12336,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,

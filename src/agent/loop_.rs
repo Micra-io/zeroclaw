@@ -300,6 +300,36 @@ fn autosave_memory_key(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4())
 }
 
+/// Construct the top-of-history system `ChatMessage`, preserving the
+/// stable/dynamic split for providers that support multi-block system
+/// prompts (Anthropic).
+///
+/// - `system_prompt` is the legacy single-string view of the prompt (used
+///   as the message content when the split is not in effect).
+/// - `stable_prefix` is the cache-friendly prefix (identity, tools, safety,
+///   skills, bootstrap files, tool instructions, deferred MCP names).
+/// - `dynamic_body` is the per-call body (Channel Capabilities, Date & Time,
+///   Runtime) that follows the cache breakpoint.
+///
+/// When `stable_prefix` is `Some`, the returned message has `stable_prefix`
+/// populated and `content` set to `dynamic_body` so Anthropic can emit two
+/// `SystemBlock`s with `cache_control` on the stable one only. For
+/// providers without multi-block support, the `concatenated_content`
+/// helper re-joins the two pieces into the same byte layout as
+/// `system_prompt`.
+fn build_system_message(
+    system_prompt: &str,
+    stable_prefix: Option<&str>,
+    dynamic_body: &str,
+) -> ChatMessage {
+    match stable_prefix {
+        Some(stable) if !stable.is_empty() => {
+            ChatMessage::system_with_stable_prefix(stable.to_string(), dynamic_body.to_string())
+        }
+        _ => ChatMessage::system(system_prompt.to_string()),
+    }
+}
+
 /// Build context preamble by searching memory for relevant entries.
 /// Entries with a hybrid score below `min_relevance_score` are dropped to
 /// prevent unrelated memories from bleeding into the conversation.
@@ -3899,7 +3929,14 @@ pub async fn run(
         None
     };
     let native_tools = provider.supports_native_tools();
-    let mut system_prompt = crate::channels::build_system_prompt_with_mode_and_autonomy(
+    // Split the system prompt so Anthropic prompt caching survives across
+    // turns and cron runs. `parts.stable` holds identity/tools/safety/
+    // skills/bootstrap — the cache-friendly prefix. `parts.dynamic` holds
+    // Channel Capabilities / Date & Time / Runtime — per-call bytes that
+    // would otherwise invalidate the cache. We append tool instructions
+    // and deferred MCP text onto `parts.stable` so they sit in front of
+    // the cache breakpoint too.
+    let mut parts = crate::channels::build_system_prompt_parts_with_mode_and_autonomy(
         &config.workspace_dir,
         &model_name,
         &tool_descs,
@@ -3915,14 +3952,30 @@ pub async fn run(
 
     // Append structured tool-use instructions with schemas (only for non-native providers)
     if !native_tools {
-        system_prompt.push_str(&build_tool_instructions(&tools_registry, Some(&i18n_descs)));
+        parts.stable.push_str(&build_tool_instructions(&tools_registry, Some(&i18n_descs)));
     }
 
     // Append deferred MCP tool names so the LLM knows what is available
     if !deferred_section.is_empty() {
-        system_prompt.push('\n');
-        system_prompt.push_str(&deferred_section);
+        parts.stable.push('\n');
+        parts.stable.push_str(&deferred_section);
     }
+
+    // Materialize the split: `stable_prefix_base` becomes the cached
+    // block on supporting providers; `dynamic_base` is what goes into
+    // `ChatMessage.content` and gets rewritten per turn when a thinking
+    // prefix is active; `system_prompt` is the legacy single-string view
+    // used by downstream code paths that still expect one `String`. For
+    // providers without multi-block support, they see the same
+    // concatenated bytes as before because `ChatMessage::concatenated_content`
+    // fuses stable+dynamic with the same separator as `into_single_string`.
+    let stable_prefix_base: Option<String> = if parts.stable.is_empty() {
+        None
+    } else {
+        Some(parts.stable.clone())
+    };
+    let dynamic_base: String = parts.dynamic.clone();
+    let mut system_prompt = parts.into_single_string();
 
     // ── Approval manager (supervised mode) ───────────────────────
     let approval_manager = if interactive {
@@ -3969,7 +4022,16 @@ pub async fn run(
             temperature + thinking_params.temperature_adjustment,
         );
 
-        // Prepend thinking system prompt prefix when present.
+        // Prepend thinking system prompt prefix when present. For the
+        // legacy single-string view we keep the original semantics (prefix
+        // at the very front). For the multi-block view used by cache-
+        // aware providers we inject the prefix into the dynamic body only,
+        // so the stable prefix stays byte-identical across turns and the
+        // Anthropic prompt cache survives.
+        let dynamic_body_for_turn = match thinking_params.system_prompt_prefix.as_ref() {
+            Some(prefix) => format!("{prefix}\n\n{dynamic_base}"),
+            None => dynamic_base.clone(),
+        };
         if let Some(ref prefix) = thinking_params.system_prompt_prefix {
             system_prompt = format!("{prefix}\n\n{system_prompt}");
         }
@@ -4012,7 +4074,11 @@ pub async fn run(
         };
 
         let mut history = vec![
-            ChatMessage::system(&system_prompt),
+            build_system_message(
+                &system_prompt,
+                stable_prefix_base.as_deref(),
+                &dynamic_body_for_turn,
+            ),
             ChatMessage::user(&enriched),
         ];
 
@@ -4133,9 +4199,26 @@ pub async fn run(
 
         // Persistent conversation history across turns
         let mut history = if let Some(path) = session_state_file.as_deref() {
-            load_interactive_session_history(path, &system_prompt)?
+            let mut loaded = load_interactive_session_history(path, &system_prompt)?;
+            if let Some(sys_msg) = loaded.first_mut() {
+                if sys_msg.role == "system" {
+                    // Re-split the loaded system message: move the stable
+                    // prefix into its own field and leave only the dynamic
+                    // body in `content`, so the Anthropic cache breakpoint
+                    // still lands between them.
+                    if let Some(ref stable) = stable_prefix_base {
+                        sys_msg.stable_prefix = Some(stable.clone());
+                        sys_msg.content = dynamic_base.clone();
+                    }
+                }
+            }
+            loaded
         } else {
-            vec![ChatMessage::system(&system_prompt)]
+            vec![build_system_message(
+                &system_prompt,
+                stable_prefix_base.as_deref(),
+                &dynamic_base,
+            )]
         };
 
         loop {
@@ -4197,7 +4280,11 @@ pub async fn run(
                     }
 
                     history.clear();
-                    history.push(ChatMessage::system(&system_prompt));
+                    history.push(build_system_message(
+                        &system_prompt,
+                        stable_prefix_base.as_deref(),
+                        &dynamic_base,
+                    ));
                     // Clear conversation and daily memory
                     let mut cleared = 0;
                     for category in [MemoryCategory::Conversation, MemoryCategory::Daily] {
@@ -4240,14 +4327,21 @@ pub async fn run(
                 temperature + thinking_params.temperature_adjustment,
             );
 
-            // For non-Medium levels, temporarily patch the system prompt with prefix.
+            // For non-Medium levels, temporarily patch the system prompt
+            // with the thinking prefix. When we have a stable_prefix split,
+            // the prefix goes into the dynamic body only so the cache
+            // breakpoint on the stable block stays valid across turns.
             let turn_system_prompt;
             if let Some(ref prefix) = thinking_params.system_prompt_prefix {
                 turn_system_prompt = format!("{prefix}\n\n{system_prompt}");
                 // Update the system message in history for this turn.
                 if let Some(sys_msg) = history.first_mut() {
                     if sys_msg.role == "system" {
-                        sys_msg.content = turn_system_prompt.clone();
+                        if sys_msg.stable_prefix.is_some() {
+                            sys_msg.content = format!("{prefix}\n\n{dynamic_base}");
+                        } else {
+                            sys_msg.content = turn_system_prompt.clone();
+                        }
                     }
                 }
             }
@@ -4502,10 +4596,16 @@ pub async fn run(
             trim_history(&mut history, config.agent.max_history_messages);
 
             // Restore base system prompt (remove per-turn thinking prefix).
+            // Preserve `stable_prefix` so the cache breakpoint survives —
+            // only rewrite `content` (the dynamic body).
             if thinking_params.system_prompt_prefix.is_some() {
                 if let Some(sys_msg) = history.first_mut() {
                     if sys_msg.role == "system" {
-                        sys_msg.content.clone_from(&base_system_prompt);
+                        if sys_msg.stable_prefix.is_some() {
+                            sys_msg.content.clone_from(&dynamic_base);
+                        } else {
+                            sys_msg.content.clone_from(&base_system_prompt);
+                        }
                     }
                 }
             }
@@ -4772,7 +4872,11 @@ pub async fn process_message(
         None
     };
     let native_tools = provider.supports_native_tools();
-    let mut system_prompt = crate::channels::build_system_prompt_with_mode_and_autonomy(
+    // Split the system prompt so Anthropic prompt caching survives across
+    // daemon invocations (same rationale as the interactive path — see the
+    // top-of-function comment). The daemon path is single-shot so there is
+    // no turn-restoration bookkeeping to worry about.
+    let mut parts = crate::channels::build_system_prompt_parts_with_mode_and_autonomy(
         &config.workspace_dir,
         &model_name,
         &tool_descs,
@@ -4786,12 +4890,20 @@ pub async fn process_message(
         config.agent.max_system_prompt_chars,
     );
     if !native_tools {
-        system_prompt.push_str(&build_tool_instructions(&tools_registry, Some(&i18n_descs)));
+        parts.stable.push_str(&build_tool_instructions(&tools_registry, Some(&i18n_descs)));
     }
     if !deferred_section.is_empty() {
-        system_prompt.push('\n');
-        system_prompt.push_str(&deferred_section);
+        parts.stable.push('\n');
+        parts.stable.push_str(&deferred_section);
     }
+
+    let stable_prefix_base: Option<String> = if parts.stable.is_empty() {
+        None
+    } else {
+        Some(parts.stable.clone())
+    };
+    let dynamic_base: String = parts.dynamic.clone();
+    let mut system_prompt = parts.into_single_string();
 
     // ── Parse thinking directive from user message ─────────────
     let (thinking_directive, effective_message) =
@@ -4812,7 +4924,13 @@ pub async fn process_message(
         config.default_temperature + thinking_params.temperature_adjustment,
     );
 
-    // Prepend thinking system prompt prefix when present.
+    // Prepend thinking system prompt prefix when present. For the legacy
+    // single-string view we keep the original semantics; for the multi-
+    // block view the prefix goes into the dynamic body only.
+    let dynamic_body_for_turn = match thinking_params.system_prompt_prefix.as_ref() {
+        Some(prefix) => format!("{prefix}\n\n{dynamic_base}"),
+        None => dynamic_base.clone(),
+    };
     if let Some(ref prefix) = thinking_params.system_prompt_prefix {
         system_prompt = format!("{prefix}\n\n{system_prompt}");
     }
@@ -4839,7 +4957,11 @@ pub async fn process_message(
     };
 
     let mut history = vec![
-        ChatMessage::system(&system_prompt),
+        build_system_message(
+            &system_prompt,
+            stable_prefix_base.as_deref(),
+            &dynamic_body_for_turn,
+        ),
         ChatMessage::user(&enriched),
     ];
     let mut excluded_tools = compute_excluded_mcp_tools(
