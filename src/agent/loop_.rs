@@ -4587,13 +4587,21 @@ pub async fn run(
                             error = %e,
                             "Context compression failed, falling back to history trim"
                         );
-                        trim_history(&mut history, config.agent.max_history_messages / 2);
+                        trim_history(
+                            &mut history,
+                            config.agent.max_history_messages / 2,
+                            config.agent.history_trim_chunked,
+                        );
                     }
                 }
             }
 
             // Hard cap as a safety net.
-            trim_history(&mut history, config.agent.max_history_messages);
+            trim_history(
+                &mut history,
+                config.agent.max_history_messages,
+                config.agent.history_trim_chunked,
+            );
 
             // Restore base system prompt (remove per-turn thinking prefix).
             // Preserve `stable_prefix` so the cache breakpoint survives —
@@ -8188,7 +8196,7 @@ Tail"#;
         let original_len = history.len();
         assert!(original_len > DEFAULT_MAX_HISTORY_MESSAGES + 1);
 
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES, false);
 
         // System prompt preserved
         assert_eq!(history[0].role, "system");
@@ -8210,7 +8218,7 @@ Tail"#;
             ChatMessage::user("hello"),
             ChatMessage::assistant("hi"),
         ];
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES, false);
         assert_eq!(history.len(), 3);
     }
 
@@ -8468,7 +8476,7 @@ Final answer."#;
         for i in 0..DEFAULT_MAX_HISTORY_MESSAGES + 20 {
             history.push(ChatMessage::user(format!("msg {i}")));
         }
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES, false);
         assert_eq!(history.len(), DEFAULT_MAX_HISTORY_MESSAGES);
     }
 
@@ -8480,7 +8488,7 @@ Final answer."#;
             history.push(ChatMessage::user(format!("user {i}")));
             history.push(ChatMessage::assistant(format!("assistant {i}")));
         }
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES, false);
         assert_eq!(history[0].role, "system");
         assert_eq!(history[history.len() - 1].role, "assistant");
     }
@@ -8489,7 +8497,7 @@ Final answer."#;
     fn trim_history_with_only_system_prompt() {
         // Recovery: Only system prompt should not be trimmed
         let mut history = vec![ChatMessage::system("system prompt")];
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES, false);
         assert_eq!(history.len(), 1);
     }
 
@@ -8917,14 +8925,14 @@ Let me check the result."#;
     #[test]
     fn trim_history_empty_history() {
         let mut history: Vec<crate::providers::ChatMessage> = vec![];
-        trim_history(&mut history, 10);
+        trim_history(&mut history, 10, false);
         assert!(history.is_empty());
     }
 
     #[test]
     fn trim_history_system_only() {
         let mut history = vec![crate::providers::ChatMessage::system("system prompt")];
-        trim_history(&mut history, 10);
+        trim_history(&mut history, 10, false);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].role, "system");
     }
@@ -8936,7 +8944,7 @@ Let me check the result."#;
             crate::providers::ChatMessage::user("msg 1"),
             crate::providers::ChatMessage::assistant("reply 1"),
         ];
-        trim_history(&mut history, 2); // 2 non-system messages = exactly at limit
+        trim_history(&mut history, 2, false); // 2 non-system messages = exactly at limit
         assert_eq!(history.len(), 3, "should not trim when exactly at limit");
     }
 
@@ -8949,10 +8957,101 @@ Let me check the result."#;
             crate::providers::ChatMessage::user("new msg"),
             crate::providers::ChatMessage::assistant("new reply"),
         ];
-        trim_history(&mut history, 2);
+        trim_history(&mut history, 2, false);
         assert_eq!(history.len(), 3); // system + 2 kept
         assert_eq!(history[0].role, "system");
         assert_eq!(history[1].content, "new msg");
+    }
+
+    // ── Chunked-mode trim_history tests (Task #6) ──────────────────
+
+    /// Chunked mode: trim is a no-op while non-system count stays within
+    /// `2 * max_history`. This is what lets the Anthropic message-level
+    /// cache survive `max_history` turns before the next batched drop.
+    #[test]
+    fn trim_history_chunked_noop_below_double_threshold() {
+        let max = 10;
+        let mut history = vec![crate::providers::ChatMessage::system("sys")];
+        for i in 0..(2 * max) {
+            history.push(crate::providers::ChatMessage::user(format!("msg {i}")));
+        }
+        assert_eq!(history.len(), 1 + 2 * max);
+
+        trim_history(&mut history, max, true);
+
+        // Exactly at 2*max non-system → still no trim in chunked mode.
+        assert_eq!(history.len(), 1 + 2 * max, "chunked mode must not trim at exactly 2*max");
+        assert_eq!(history[0].role, "system");
+    }
+
+    /// Chunked mode: once non-system count exceeds `2 * max`, trim fires
+    /// and brings the buffer back down to exactly `max` non-system
+    /// messages in a single batch.
+    #[test]
+    fn trim_history_chunked_fires_above_double_threshold() {
+        let max = 10;
+        let mut history = vec![crate::providers::ChatMessage::system("sys")];
+        for i in 0..(2 * max + 1) {
+            history.push(crate::providers::ChatMessage::user(format!("msg {i}")));
+        }
+
+        trim_history(&mut history, max, true);
+
+        // System preserved, non-system trimmed back down to exactly `max`.
+        assert_eq!(history.len(), 1 + max, "chunked mode must drain down to max");
+        assert_eq!(history[0].role, "system");
+        // The oldest surviving non-system message is `msg (max + 1)` —
+        // the `max + 1` oldest entries were dropped.
+        assert_eq!(history[1].content, format!("msg {}", max + 1));
+    }
+
+    /// Chunked mode cache-stability check: after a chunked trim, the
+    /// oldest surviving non-system message must not move as further
+    /// turns are appended up to the next `2 * max` threshold. This is
+    /// the property that makes the Anthropic message-level cache
+    /// breakpoint hit across turns.
+    #[test]
+    fn trim_history_chunked_oldest_stable_between_trims() {
+        let max = 4;
+        let mut history = vec![crate::providers::ChatMessage::system("sys")];
+        for i in 0..(2 * max + 1) {
+            history.push(crate::providers::ChatMessage::user(format!("msg {i}")));
+        }
+
+        // First trim: drops the oldest, leaves `max` non-system.
+        trim_history(&mut history, max, true);
+        let oldest_after_first_trim = history[1].content.clone();
+        assert_eq!(history.len(), 1 + max);
+
+        // Append turns one at a time up to (but not past) `2 * max` and
+        // assert the oldest surviving non-system message stays byte-stable.
+        for extra in 0..max {
+            history.push(crate::providers::ChatMessage::user(format!("extra {extra}")));
+            trim_history(&mut history, max, true);
+            assert_eq!(
+                history[1].content, oldest_after_first_trim,
+                "oldest non-system message must stay byte-stable across chunked trims"
+            );
+        }
+    }
+
+    /// Regression guard: legacy per-turn mode still trims the moment
+    /// non-system count exceeds `max`, preserving the pre-fix behaviour
+    /// for operators who flip the config flag off.
+    #[test]
+    fn trim_history_legacy_per_turn_behaviour() {
+        let max = 10;
+        let mut history = vec![crate::providers::ChatMessage::system("sys")];
+        for i in 0..(max + 1) {
+            history.push(crate::providers::ChatMessage::user(format!("msg {i}")));
+        }
+
+        trim_history(&mut history, max, false);
+
+        // Legacy mode drops exactly 1 message to bring non-system back to `max`.
+        assert_eq!(history.len(), 1 + max);
+        assert_eq!(history[0].role, "system");
+        assert_eq!(history[1].content, "msg 1");
     }
 
     /// When `build_system_prompt_with_mode` is called with `native_tools = true`,

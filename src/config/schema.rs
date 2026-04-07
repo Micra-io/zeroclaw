@@ -1323,6 +1323,15 @@ pub struct AgentConfig {
     /// Maximum conversation history messages retained per session. Default: `50`.
     #[serde(default = "default_agent_max_history_messages")]
     pub max_history_messages: usize,
+    /// When `true`, `trim_history` only fires once the history exceeds
+    /// `2 * max_history_messages` and trims back down to
+    /// `max_history_messages` in a single batch, keeping the conversation
+    /// prefix byte-stable for `max_history_messages` turns at a time so
+    /// the Anthropic message-level cache breakpoint hits reliably. Set to
+    /// `false` to restore the per-turn trim behaviour (drops one message
+    /// the moment the count exceeds `max_history_messages`). Default: `true`.
+    #[serde(default = "default_agent_history_trim_chunked")]
+    pub history_trim_chunked: bool,
     /// Maximum estimated tokens for conversation history before compaction triggers.
     /// Uses ~4 chars/token heuristic. When this threshold is exceeded, older messages
     /// are summarized to preserve context while staying within budget. Default: `32000`.
@@ -1405,6 +1414,10 @@ fn default_agent_max_history_messages() -> usize {
     50
 }
 
+fn default_agent_history_trim_chunked() -> bool {
+    true
+}
+
 fn default_agent_max_context_tokens() -> usize {
     32_000
 }
@@ -1423,6 +1436,7 @@ impl Default for AgentConfig {
             compact_context: true,
             max_tool_iterations: default_agent_max_tool_iterations(),
             max_history_messages: default_agent_max_history_messages(),
+            history_trim_chunked: default_agent_history_trim_chunked(),
             max_context_tokens: default_agent_max_context_tokens(),
             parallel_tools: false,
             tool_dispatcher: default_agent_tool_dispatcher(),
@@ -12023,6 +12037,10 @@ reasoning_effort = "turbo"
         assert!(cfg.compact_context);
         assert_eq!(cfg.max_tool_iterations, 10);
         assert_eq!(cfg.max_history_messages, 50);
+        assert!(
+            cfg.history_trim_chunked,
+            "history_trim_chunked must default to true so the Anthropic message cache survives"
+        );
         assert!(!cfg.parallel_tools);
         assert_eq!(cfg.tool_dispatcher, "auto");
     }
@@ -12042,8 +12060,24 @@ tool_dispatcher = "xml"
         assert!(parsed.agent.compact_context);
         assert_eq!(parsed.agent.max_tool_iterations, 20);
         assert_eq!(parsed.agent.max_history_messages, 80);
+        // Omitted from the TOML → default applies.
+        assert!(parsed.agent.history_trim_chunked);
         assert!(parsed.agent.parallel_tools);
         assert_eq!(parsed.agent.tool_dispatcher, "xml");
+    }
+
+    #[test]
+    async fn agent_config_history_trim_chunked_round_trips_false() {
+        let raw = r#"
+default_temperature = 0.7
+[agent]
+history_trim_chunked = false
+"#;
+        let parsed = parse_test_config(raw);
+        assert!(
+            !parsed.agent.history_trim_chunked,
+            "history_trim_chunked = false must round-trip for operators who need to disable chunked mode"
+        );
     }
 
     #[test]
