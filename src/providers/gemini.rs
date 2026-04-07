@@ -1228,13 +1228,13 @@ impl Provider for GeminiProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
-        let mut system_parts: Vec<&str> = Vec::new();
+        let mut system_parts: Vec<String> = Vec::new();
         let mut contents: Vec<Content> = Vec::new();
 
         for msg in messages {
             match msg.role.as_str() {
                 "system" => {
-                    system_parts.push(&msg.content);
+                    system_parts.push(msg.concatenated_content());
                 }
                 "user" => {
                     contents.push(Content {

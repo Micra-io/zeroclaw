@@ -5,10 +5,18 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 
 /// A single message in a conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Optional stable prefix for system messages. When `Some`, providers that
+    /// support multi-block prompts (e.g. Anthropic) emit this as a separate
+    /// cached `SystemBlock` *before* `content`, keeping the cache-friendly
+    /// bytes in front of per-call dynamic content (dates, runtime info, etc.).
+    /// Providers without multi-block support concatenate `stable_prefix` and
+    /// `content` so the on-wire byte order matches the single-string layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_prefix: Option<String>,
 }
 
 impl ChatMessage {
@@ -16,6 +24,23 @@ impl ChatMessage {
         Self {
             role: "system".into(),
             content: content.into(),
+            stable_prefix: None,
+        }
+    }
+
+    /// System message split into a cacheable stable prefix and a dynamic
+    /// suffix. Providers that support prompt caching place the breakpoint
+    /// between the two so the stable bytes survive cache lookups across
+    /// turns while the dynamic bytes (timestamps, runtime info, etc.) are
+    /// re-sent on every call.
+    pub fn system_with_stable_prefix(
+        stable: impl Into<String>,
+        dynamic: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: "system".into(),
+            content: dynamic.into(),
+            stable_prefix: Some(stable.into()),
         }
     }
 
@@ -23,6 +48,7 @@ impl ChatMessage {
         Self {
             role: "user".into(),
             content: content.into(),
+            stable_prefix: None,
         }
     }
 
@@ -30,6 +56,7 @@ impl ChatMessage {
         Self {
             role: "assistant".into(),
             content: content.into(),
+            stable_prefix: None,
         }
     }
 
@@ -37,6 +64,23 @@ impl ChatMessage {
         Self {
             role: "tool".into(),
             content: content.into(),
+            stable_prefix: None,
+        }
+    }
+
+    /// Concatenate `stable_prefix` (if present) and `content` in the exact
+    /// byte order providers without multi-block support should transmit.
+    /// Preserves today's single-string layout for OpenRouter, OpenAI, etc.
+    pub fn concatenated_content(&self) -> String {
+        match self.stable_prefix.as_deref() {
+            Some(stable) if !stable.is_empty() => {
+                if self.content.is_empty() {
+                    stable.to_string()
+                } else {
+                    format!("{}\n{}", stable.trim_end(), self.content)
+                }
+            }
+            _ => self.content.clone(),
         }
     }
 }
@@ -376,16 +420,19 @@ pub trait Provider: Send + Sync {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
-        let system = messages
+        // Materialize the system message into its concatenated form so
+        // that providers which only see a single string still receive the
+        // full prompt when the caller supplied a `stable_prefix` split.
+        let system_owned = messages
             .iter()
             .find(|m| m.role == "system")
-            .map(|m| m.content.as_str());
+            .map(ChatMessage::concatenated_content);
         let last_user = messages
             .iter()
             .rfind(|m| m.role == "user")
             .map(|m| m.content.as_str())
             .unwrap_or("");
-        self.chat_with_system(system, last_user, model, temperature)
+        self.chat_with_system(system_owned.as_deref(), last_user, model, temperature)
             .await
     }
 
@@ -520,16 +567,18 @@ pub trait Provider: Send + Sync {
         temperature: f64,
         options: StreamOptions,
     ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
-        let system = messages
+        // Materialize system message (with any `stable_prefix`) into the
+        // concatenated form before borrowing as `&str`.
+        let system_owned = messages
             .iter()
             .find(|m| m.role == "system")
-            .map(|m| m.content.as_str());
+            .map(ChatMessage::concatenated_content);
         let last_user = messages
             .iter()
             .rfind(|m| m.role == "user")
             .map(|m| m.content.as_str())
             .unwrap_or("");
-        self.stream_chat_with_system(system, last_user, model, temperature, options)
+        self.stream_chat_with_system(system_owned.as_deref(), last_user, model, temperature, options)
     }
 
     /// Structured streaming chat interface.

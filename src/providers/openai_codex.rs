@@ -211,12 +211,12 @@ fn normalize_model_id(model: &str) -> &str {
 }
 
 fn build_responses_input(messages: &[ChatMessage]) -> (String, Vec<ResponsesInput>) {
-    let mut system_parts: Vec<&str> = Vec::new();
+    let mut system_parts: Vec<String> = Vec::new();
     let mut input: Vec<ResponsesInput> = Vec::new();
 
     for msg in messages {
         match msg.role.as_str() {
-            "system" => system_parts.push(&msg.content),
+            "system" => system_parts.push(msg.concatenated_content()),
             "user" => {
                 let (cleaned_text, image_refs) = multimodal::parse_image_markers(&msg.content);
 

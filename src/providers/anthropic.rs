@@ -352,14 +352,22 @@ impl AnthropicProvider {
     }
 
     fn convert_messages(messages: &[ChatMessage]) -> (Option<SystemPrompt>, Vec<NativeMessage>) {
-        let mut system_text = None;
+        // Captured from the first `role: "system"` message. `stable` holds
+        // `ChatMessage::stable_prefix` when the caller split the prompt;
+        // `dynamic` holds the rest (what used to be the whole system
+        // prompt).  When both are present we emit two `SystemBlock`s and
+        // place the cache_control breakpoint between them so the stable
+        // bytes survive cache lookups across turns and cron runs.
+        let mut system_stable: Option<String> = None;
+        let mut system_dynamic: Option<String> = None;
         let mut native_messages = Vec::new();
 
         for msg in messages {
             match msg.role.as_str() {
                 "system" => {
-                    if system_text.is_none() {
-                        system_text = Some(msg.content.clone());
+                    if system_dynamic.is_none() {
+                        system_stable = msg.stable_prefix.clone();
+                        system_dynamic = Some(msg.content.clone());
                     }
                 }
                 "assistant" => {
@@ -544,14 +552,36 @@ impl AnthropicProvider {
             i += 1;
         }
 
-        // Always use Blocks format with cache_control for system prompts
-        let system_prompt = system_text.map(|text| {
-            SystemPrompt::Blocks(vec![SystemBlock {
+        // Emit the system prompt as one or two `SystemBlock`s. Two-block
+        // layout is used when the caller provided a `stable_prefix` on the
+        // system `ChatMessage`: the stable block gets `cache_control`, the
+        // dynamic block (date/time, runtime, etc.) does not. This keeps the
+        // cache breakpoint in front of per-call dynamic content so the
+        // Anthropic prefix cache actually survives across turns.
+        let system_prompt = match (system_stable, system_dynamic) {
+            (Some(stable), Some(dynamic)) if !stable.is_empty() => {
+                let mut blocks = Vec::with_capacity(2);
+                blocks.push(SystemBlock {
+                    block_type: "text".to_string(),
+                    text: stable,
+                    cache_control: Some(CacheControl::ephemeral()),
+                });
+                if !dynamic.is_empty() {
+                    blocks.push(SystemBlock {
+                        block_type: "text".to_string(),
+                        text: dynamic,
+                        cache_control: None,
+                    });
+                }
+                Some(SystemPrompt::Blocks(blocks))
+            }
+            (_, Some(text)) => Some(SystemPrompt::Blocks(vec![SystemBlock {
                 block_type: "text".to_string(),
                 text,
                 cache_control: Some(CacheControl::ephemeral()),
-            }])
-        });
+            }])),
+            _ => None,
+        };
 
         (system_prompt, native_messages)
     }
