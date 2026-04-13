@@ -448,6 +448,17 @@ mod tests {
         assert!(!should_skip_autosave_content(
             "User prefers concise answers."
         ));
+
+        // Memory context prefix must be filtered (prevents recursive cron explosion — issue #33)
+        assert!(should_skip_autosave_content(
+            "[Memory context]\n- key: value\n\n[cron:42 patrol] check status"
+        ));
+        assert!(should_skip_autosave_content(
+            "[memory context]\n- key: value\n\n[cron:42 patrol] check status"
+        ));
+        assert!(should_skip_autosave_content(
+            "[MEMORY CONTEXT]\n- key: value"
+        ));
     }
 
     #[test]
