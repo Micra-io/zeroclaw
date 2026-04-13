@@ -623,6 +623,7 @@ mod tests {
             ChatMessage {
                 role: "assistant".to_string(),
                 content: "[IMAGE:/tmp/assistant.png]\nAssistant generated".to_string(),
+                stable_prefix: None,
             },
             ChatMessage::user("[IMAGE:/tmp/user1.png]\nFirst".to_string()),
             ChatMessage::user("[IMAGE:/tmp/user2.png]\nSecond".to_string()),
@@ -680,11 +681,13 @@ mod tests {
             ChatMessage {
                 role: "assistant".to_string(),
                 content: "I see a photo.".to_string(),
+                stable_prefix: None,
             },
             ChatMessage::user("[IMAGE:/tmp/2.png]\nWhat about this?".to_string()),
             ChatMessage {
                 role: "assistant".to_string(),
                 content: "That's a chart.".to_string(),
+                stable_prefix: None,
             },
             ChatMessage::user("[IMAGE:/tmp/3.png]\nAnd this one".to_string()),
         ];
