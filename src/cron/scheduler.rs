@@ -289,6 +289,7 @@ async fn run_agent_job(
             Ok(entries) if !entries.is_empty() => {
                 let ctx: String = entries
                     .iter()
+                    .filter(|e| !crate::memory::is_assistant_autosave_key(&e.key))
                     .filter(|e| !crate::memory::should_skip_autosave_content(&e.content))
                     .map(|e| format!("- {}: {}", e.key, e.content))
                     .collect::<Vec<_>>()
