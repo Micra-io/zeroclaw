@@ -41,10 +41,22 @@ enum MessageContent {
 }
 
 #[derive(Debug, Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    cache_type: String,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum MessagePart {
-    Text { text: String },
-    ImageUrl { image_url: ImageUrlPart },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    ImageUrl {
+        image_url: ImageUrlPart,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +149,14 @@ struct UsageInfo {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,6 +294,14 @@ impl OpenRouterProvider {
     }
 
     fn to_message_content(role: &str, content: &str) -> MessageContent {
+        if role == "system" {
+            return MessageContent::Parts(vec![MessagePart::Text {
+                text: content.to_string(),
+                cache_control: Some(CacheControl {
+                    cache_type: "ephemeral".to_string(),
+                }),
+            }]);
+        }
         if role != "user" {
             return MessageContent::Text(content.to_string());
         }
@@ -288,6 +316,7 @@ impl OpenRouterProvider {
         if !trimmed_text.is_empty() {
             parts.push(MessagePart::Text {
                 text: trimmed_text.to_string(),
+                cache_control: None,
             });
         }
 
@@ -532,11 +561,17 @@ impl Provider for OpenRouterProvider {
         let body = Self::read_response_body("OpenRouter", response).await?;
         let native_response =
             Self::parse_response_body::<NativeChatResponse>("OpenRouter", &body, "native chat")?;
-        let usage = native_response.usage.map(|u| TokenUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            cached_input_tokens: None,
-            ..Default::default()
+        // OpenRouter cached_tokens = read-only (no creation billing).
+        // cached_input_tokens = read + creation = read + 0.
+        let usage = native_response.usage.map(|u| {
+            let cached = u.prompt_tokens_details.and_then(|d| d.cached_tokens);
+            TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cached_input_tokens: cached,
+                cache_read_input_tokens: cached,
+                cache_creation_input_tokens: None,
+            }
         });
         let message = native_response
             .choices
@@ -624,11 +659,17 @@ impl Provider for OpenRouterProvider {
         let body = Self::read_response_body("OpenRouter", response).await?;
         let native_response =
             Self::parse_response_body::<NativeChatResponse>("OpenRouter", &body, "native chat")?;
-        let usage = native_response.usage.map(|u| TokenUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            cached_input_tokens: None,
-            ..Default::default()
+        // OpenRouter cached_tokens = read-only (no creation billing).
+        // cached_input_tokens = read + creation = read + 0.
+        let usage = native_response.usage.map(|u| {
+            let cached = u.prompt_tokens_details.and_then(|d| d.cached_tokens);
+            TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cached_input_tokens: cached,
+                cache_read_input_tokens: cached,
+                cache_creation_input_tokens: None,
+            }
         });
         let message = native_response
             .choices
@@ -717,10 +758,12 @@ mod tests {
             ChatMessage {
                 role: "system".into(),
                 content: "be concise".into(),
+                stable_prefix: None,
             },
             ChatMessage {
                 role: "user".into(),
                 content: "hello".into(),
+                stable_prefix: None,
             },
         ];
 
@@ -764,10 +807,12 @@ mod tests {
             ChatMessage {
                 role: "assistant".into(),
                 content: "Previous answer".into(),
+                stable_prefix: None,
             },
             ChatMessage {
                 role: "user".into(),
                 content: "Follow-up".into(),
+                stable_prefix: None,
             },
         ];
 
@@ -849,6 +894,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: "user".into(),
             content: "What is the date?".into(),
+            stable_prefix: None,
         }];
         let tools = vec![serde_json::json!({
             "type": "function",
@@ -944,6 +990,7 @@ mod tests {
             role: "assistant".into(),
             content: r#"{"content":"Using tool","tool_calls":[{"id":"call_abc","name":"shell","arguments":"{\"command\":\"pwd\"}"}]}"#
                 .into(),
+            stable_prefix: None,
         }];
 
         let converted = OpenRouterProvider::convert_messages(&messages);
@@ -972,6 +1019,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: "tool".into(),
             content: r#"{"tool_call_id":"call_xyz","content":"done"}"#.into(),
+            stable_prefix: None,
         }];
 
         let converted = OpenRouterProvider::convert_messages(&messages);
@@ -1023,6 +1071,227 @@ mod tests {
         let json = r#"{"choices": [{"message": {"content": "Hello"}}]}"#;
         let resp: NativeChatResponse = serde_json::from_str(json).unwrap();
         assert!(resp.usage.is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // prompt caching: response-side deserialization (Unit 1)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn usage_deserializes_cached_tokens() {
+        let json = r#"{
+            "prompt_tokens": 25000,
+            "completion_tokens": 500,
+            "prompt_tokens_details": {"cached_tokens": 20000}
+        }"#;
+        let usage: UsageInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.prompt_tokens, Some(25000));
+        assert_eq!(usage.completion_tokens, Some(500));
+        let details = usage.prompt_tokens_details.unwrap();
+        assert_eq!(details.cached_tokens, Some(20000));
+    }
+
+    #[test]
+    fn usage_deserializes_cached_tokens_zero() {
+        let json = r#"{
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "prompt_tokens_details": {"cached_tokens": 0}
+        }"#;
+        let usage: UsageInfo = serde_json::from_str(json).unwrap();
+        let details = usage.prompt_tokens_details.unwrap();
+        assert_eq!(details.cached_tokens, Some(0));
+    }
+
+    #[test]
+    fn usage_deserializes_without_prompt_tokens_details() {
+        let json = r#"{"prompt_tokens": 100, "completion_tokens": 50}"#;
+        let usage: UsageInfo = serde_json::from_str(json).unwrap();
+        assert!(usage.prompt_tokens_details.is_none());
+    }
+
+    #[test]
+    fn usage_deserializes_empty_prompt_tokens_details() {
+        let json = r#"{
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "prompt_tokens_details": {}
+        }"#;
+        let usage: UsageInfo = serde_json::from_str(json).unwrap();
+        let details = usage.prompt_tokens_details.unwrap();
+        assert!(details.cached_tokens.is_none());
+    }
+
+    #[test]
+    fn native_response_deserializes_with_cached_tokens() {
+        let json = r#"{
+            "choices": [{"message": {"content": "Hello"}}],
+            "usage": {
+                "prompt_tokens": 25000,
+                "completion_tokens": 500,
+                "prompt_tokens_details": {"cached_tokens": 20000}
+            }
+        }"#;
+        let resp: NativeChatResponse = serde_json::from_str(json).unwrap();
+        let usage = resp.usage.unwrap();
+        let details = usage.prompt_tokens_details.unwrap();
+        assert_eq!(details.cached_tokens, Some(20000));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // prompt caching: request-side serialization (Unit 2)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn system_message_serializes_as_content_block_with_cache_control() {
+        let content = OpenRouterProvider::to_message_content("system", "You are helpful.");
+        let json = serde_json::to_value(&content).unwrap();
+        let parts = json.as_array().expect("system content should be an array");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "You are helpful.");
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn user_message_serializes_as_plain_string() {
+        let content = OpenRouterProvider::to_message_content("user", "Hello");
+        let json = serde_json::to_value(&content).unwrap();
+        assert!(json.is_string(), "user content should be a plain string");
+        assert_eq!(json.as_str().unwrap(), "Hello");
+    }
+
+    #[test]
+    fn assistant_message_serializes_as_plain_string() {
+        let content = OpenRouterProvider::to_message_content("assistant", "Hi there.");
+        let json = serde_json::to_value(&content).unwrap();
+        assert!(json.is_string(), "assistant content should be a plain string");
+        assert_eq!(json.as_str().unwrap(), "Hi there.");
+    }
+
+    #[test]
+    fn cache_control_not_serialized_for_user_image_text_part() {
+        let content = OpenRouterProvider::to_message_content(
+            "user",
+            "Describe this\n\n[IMAGE:data:image/png;base64,abcd]",
+        );
+        let json = serde_json::to_value(&content).unwrap();
+        let parts = json.as_array().expect("multimodal content should be array");
+        let text_part = &parts[0];
+        assert_eq!(text_part["type"], "text");
+        assert!(
+            text_part.get("cache_control").is_none()
+                || text_part["cache_control"].is_null(),
+            "cache_control should not appear on user image text parts"
+        );
+    }
+
+    #[test]
+    fn full_native_request_serializes_system_as_blocks_user_as_string() {
+        let messages = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: "Be helpful".into(),
+                stable_prefix: None,
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: "Hi".into(),
+                stable_prefix: None,
+            },
+        ];
+        let native = OpenRouterProvider::convert_messages(&messages);
+        assert_eq!(native.len(), 2);
+
+        // System message should be Parts
+        let sys_json = serde_json::to_value(&native[0].content).unwrap();
+        let sys_content = sys_json.as_array().expect("system content should be array");
+        assert_eq!(sys_content[0]["cache_control"]["type"], "ephemeral");
+
+        // User message should be Text
+        let user_json = serde_json::to_value(&native[1].content).unwrap();
+        assert!(user_json.is_string(), "user content should be string");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // prompt caching: response-side token mapping (Unit 3)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn native_response_maps_cached_tokens_to_token_usage() {
+        let json = r#"{
+            "choices": [{"message": {"content": "Hello"}}],
+            "usage": {
+                "prompt_tokens": 25000,
+                "completion_tokens": 500,
+                "prompt_tokens_details": {"cached_tokens": 15000}
+            }
+        }"#;
+        let resp: NativeChatResponse = serde_json::from_str(json).unwrap();
+        let usage = resp.usage.map(|u| {
+            let cached = u.prompt_tokens_details.and_then(|d| d.cached_tokens);
+            TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cached_input_tokens: cached,
+                cache_read_input_tokens: cached,
+                cache_creation_input_tokens: None,
+            }
+        });
+        let usage = usage.unwrap();
+        assert_eq!(usage.input_tokens, Some(25000));
+        assert_eq!(usage.output_tokens, Some(500));
+        assert_eq!(usage.cached_input_tokens, Some(15000));
+        assert_eq!(usage.cache_read_input_tokens, Some(15000));
+        assert!(usage.cache_creation_input_tokens.is_none());
+    }
+
+    #[test]
+    fn native_response_maps_none_when_no_prompt_tokens_details() {
+        let json = r#"{
+            "choices": [{"message": {"content": "Hello"}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50}
+        }"#;
+        let resp: NativeChatResponse = serde_json::from_str(json).unwrap();
+        let usage = resp.usage.map(|u| {
+            let cached = u.prompt_tokens_details.and_then(|d| d.cached_tokens);
+            TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cached_input_tokens: cached,
+                cache_read_input_tokens: cached,
+                cache_creation_input_tokens: None,
+            }
+        });
+        let usage = usage.unwrap();
+        assert!(usage.cached_input_tokens.is_none());
+        assert!(usage.cache_read_input_tokens.is_none());
+    }
+
+    #[test]
+    fn native_response_maps_zero_cached_tokens_as_some_zero() {
+        let json = r#"{
+            "choices": [{"message": {"content": "Hello"}}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "prompt_tokens_details": {"cached_tokens": 0}
+            }
+        }"#;
+        let resp: NativeChatResponse = serde_json::from_str(json).unwrap();
+        let usage = resp.usage.map(|u| {
+            let cached = u.prompt_tokens_details.and_then(|d| d.cached_tokens);
+            TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cached_input_tokens: cached,
+                cache_read_input_tokens: cached,
+                cache_creation_input_tokens: None,
+            }
+        });
+        let usage = usage.unwrap();
+        assert_eq!(usage.cached_input_tokens, Some(0));
+        assert_eq!(usage.cache_read_input_tokens, Some(0));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1092,6 +1361,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: "assistant".into(),
             content: history_json.to_string(),
+            stable_prefix: None,
         }];
         let native = OpenRouterProvider::convert_messages(&messages);
         assert_eq!(native.len(), 1);
@@ -1115,6 +1385,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: "assistant".into(),
             content: history_json.to_string(),
+            stable_prefix: None,
         }];
         let native = OpenRouterProvider::convert_messages(&messages);
         assert_eq!(native.len(), 1);

@@ -71,6 +71,7 @@ mod tests {
         ChatMessage {
             role: role.to_string(),
             content: content.to_string(),
+            stable_prefix: None,
         }
     }
 
