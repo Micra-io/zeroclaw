@@ -25,6 +25,7 @@ venv/
 .embuild/
 .env.local
 .env.*.local
+.envrc.local
 
 # Secret keys and credentials
 .secret_key
