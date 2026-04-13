@@ -291,6 +291,7 @@ async fn run_agent_job(
                     .iter()
                     .filter(|e| !crate::memory::is_assistant_autosave_key(&e.key))
                     .filter(|e| !crate::memory::should_skip_autosave_content(&e.content))
+                    .filter(|e| !e.content.contains("<tool_result"))
                     .map(|e| format!("- {}: {}", e.key, e.content))
                     .collect::<Vec<_>>()
                     .join("\n");
