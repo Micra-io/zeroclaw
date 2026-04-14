@@ -43,7 +43,15 @@ enum MessageContent {
 #[derive(Debug, Serialize)]
 struct CacheControl {
     #[serde(rename = "type")]
-    cache_type: String,
+    cache_type: &'static str,
+}
+
+impl CacheControl {
+    fn ephemeral() -> Self {
+        Self {
+            cache_type: "ephemeral",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -215,7 +223,11 @@ impl OpenRouterProvider {
                 },
             })
             .collect();
-        if valid.is_empty() { None } else { Some(valid) }
+        if valid.is_empty() {
+            None
+        } else {
+            Some(valid)
+        }
     }
 
     fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
@@ -282,6 +294,19 @@ impl OpenRouterProvider {
                     }
                 }
 
+                if m.role == "system" {
+                    return NativeMessage {
+                        role: "system".to_string(),
+                        content: Some(Self::system_message_content(
+                            m.stable_prefix.as_deref(),
+                            &m.content,
+                        )),
+                        tool_call_id: None,
+                        tool_calls: None,
+                        reasoning_content: None,
+                    };
+                }
+
                 NativeMessage {
                     role: m.role.clone(),
                     content: Some(Self::to_message_content(&m.role, &m.content)),
@@ -293,15 +318,63 @@ impl OpenRouterProvider {
             .collect()
     }
 
-    fn to_message_content(role: &str, content: &str) -> MessageContent {
-        if role == "system" {
-            return MessageContent::Parts(vec![MessagePart::Text {
-                text: content.to_string(),
-                cache_control: Some(CacheControl {
-                    cache_type: "ephemeral".to_string(),
-                }),
-            }]);
+    /// Map a `ChatMessage` to the legacy `Message` used by `chat_with_history`.
+    /// System role is routed through `system_message_content` so
+    /// `stable_prefix` is honored on this path too — matching the block-format
+    /// shape produced by `convert_messages` for the newer native entry points.
+    fn to_history_message(m: &ChatMessage) -> Message {
+        let content = if m.role == "system" {
+            Self::system_message_content(m.stable_prefix.as_deref(), &m.content)
+        } else {
+            Self::to_message_content(&m.role, &m.content)
+        };
+        Message {
+            role: m.role.clone(),
+            content,
         }
+    }
+
+    /// Build a system-role `MessageContent` with prompt-caching breakpoint
+    /// placed between `stable_prefix` and `content`. When `stable_prefix` is
+    /// `Some(non-empty)`, emits two `MessagePart::Text` blocks: stable with
+    /// `cache_control: ephemeral`, dynamic without. Otherwise emits a single
+    /// cached block. Mirrors the Anthropic adapter's two-`SystemBlock` layout.
+    fn system_message_content(stable_prefix: Option<&str>, content: &str) -> MessageContent {
+        match stable_prefix {
+            Some(stable) if !stable.trim().is_empty() => {
+                let mut blocks = Vec::with_capacity(2);
+                blocks.push(MessagePart::Text {
+                    text: stable.to_string(),
+                    cache_control: Some(CacheControl::ephemeral()),
+                });
+                // Mirror anthropic.rs:569 — skip the dynamic block when content
+                // is empty so we never emit a zero-length `{text: ""}` part,
+                // which some upstream OpenRouter backends reject.
+                if !content.is_empty() {
+                    blocks.push(MessagePart::Text {
+                        text: content.to_string(),
+                        cache_control: None,
+                    });
+                }
+                MessageContent::Parts(blocks)
+            }
+            _ => MessageContent::Parts(vec![MessagePart::Text {
+                text: content.to_string(),
+                cache_control: Some(CacheControl::ephemeral()),
+            }]),
+        }
+    }
+
+    fn to_message_content(role: &str, content: &str) -> MessageContent {
+        // System role must route through `system_message_content` (via
+        // `convert_messages` or `to_history_message`) to keep the
+        // `cache_control` breakpoint. Debug-assert to catch any future caller
+        // that bypasses the dispatch and silently reintroduces the STORY-008
+        // production bug.
+        debug_assert_ne!(
+            role, "system",
+            "system role must be dispatched via system_message_content"
+        );
         if role != "user" {
             return MessageContent::Text(content.to_string());
         }
@@ -481,13 +554,7 @@ impl Provider for OpenRouterProvider {
         let credential = self.credential.as_ref()
             .ok_or_else(|| anyhow::anyhow!("OpenRouter API key not set. Run `zeroclaw onboard` or set OPENROUTER_API_KEY env var."))?;
 
-        let api_messages: Vec<Message> = messages
-            .iter()
-            .map(|m| Message {
-                role: m.role.clone(),
-                content: Self::to_message_content(&m.role, &m.content),
-            })
-            .collect();
+        let api_messages: Vec<Message> = messages.iter().map(Self::to_history_message).collect();
 
         let request = ChatRequest {
             model: model.to_string(),
@@ -626,7 +693,11 @@ impl Provider for OpenRouterProvider {
                     })
                 })
                 .collect();
-            if specs.is_empty() { None } else { Some(specs) }
+            if specs.is_empty() {
+                None
+            } else {
+                Some(specs)
+            }
         };
 
         // Convert ChatMessage to NativeMessage, preserving structured assistant/tool entries
@@ -1142,16 +1213,11 @@ mod tests {
     // prompt caching: request-side serialization (Unit 2)
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[test]
-    fn system_message_serializes_as_content_block_with_cache_control() {
-        let content = OpenRouterProvider::to_message_content("system", "You are helpful.");
-        let json = serde_json::to_value(&content).unwrap();
-        let parts = json.as_array().expect("system content should be an array");
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0]["type"], "text");
-        assert_eq!(parts[0]["text"], "You are helpful.");
-        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
-    }
+    // Note: STORY-008's `system_message_serializes_as_content_block_with_cache_control`
+    // was deleted — it tested the system branch of `to_message_content` which
+    // STORY-009 removed. Equivalent coverage now lives in
+    // `system_message_without_stable_prefix_emits_single_cached_block`, which
+    // exercises the live `system_message_content` helper.
 
     #[test]
     fn user_message_serializes_as_plain_string() {
@@ -1165,7 +1231,10 @@ mod tests {
     fn assistant_message_serializes_as_plain_string() {
         let content = OpenRouterProvider::to_message_content("assistant", "Hi there.");
         let json = serde_json::to_value(&content).unwrap();
-        assert!(json.is_string(), "assistant content should be a plain string");
+        assert!(
+            json.is_string(),
+            "assistant content should be a plain string"
+        );
         assert_eq!(json.as_str().unwrap(), "Hi there.");
     }
 
@@ -1180,8 +1249,7 @@ mod tests {
         let text_part = &parts[0];
         assert_eq!(text_part["type"], "text");
         assert!(
-            text_part.get("cache_control").is_none()
-                || text_part["cache_control"].is_null(),
+            text_part.get("cache_control").is_none() || text_part["cache_control"].is_null(),
             "cache_control should not appear on user image text parts"
         );
     }
@@ -1211,6 +1279,269 @@ mod tests {
         // User message should be Text
         let user_json = serde_json::to_value(&native[1].content).unwrap();
         assert!(user_json.is_string(), "user content should be string");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // prompt caching: stable_prefix split (STORY-009)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn system_message_with_stable_prefix_emits_two_blocks() {
+        let content = OpenRouterProvider::system_message_content(Some("STABLE"), "DYNAMIC");
+        let json = serde_json::to_value(&content).unwrap();
+        let parts = json.as_array().expect("system content should be an array");
+        assert_eq!(parts.len(), 2, "expected stable + dynamic blocks");
+
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "STABLE");
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+
+        assert_eq!(parts[1]["type"], "text");
+        assert_eq!(parts[1]["text"], "DYNAMIC");
+    }
+
+    #[test]
+    fn system_message_without_stable_prefix_emits_single_cached_block() {
+        let content = OpenRouterProvider::system_message_content(None, "WHOLE");
+        let json = serde_json::to_value(&content).unwrap();
+        let parts = json.as_array().expect("system content should be an array");
+        assert_eq!(parts.len(), 1, "no stable prefix → single block");
+
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "WHOLE");
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn system_message_with_stable_prefix_and_empty_content_omits_dynamic_block() {
+        // Matches the Anthropic adapter guard at anthropic.rs:569 which skips
+        // the dynamic SystemBlock when content is empty. Without this guard,
+        // strict OpenAI-compatible upstream models (GPT-4o, DeepSeek-v3) may
+        // 400 on a `{text: ""}` content part (correctness COR-001, adversarial
+        // ADV-002).
+        let content = OpenRouterProvider::system_message_content(Some("STABLE"), "");
+        let json = serde_json::to_value(&content).unwrap();
+        let parts = json.as_array().unwrap();
+        assert_eq!(parts.len(), 1, "empty content → omit dynamic block");
+        assert_eq!(parts[0]["text"], "STABLE");
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn system_message_with_empty_stable_prefix_falls_back_to_single_block() {
+        let content = OpenRouterProvider::system_message_content(Some(""), "WHOLE");
+        let json = serde_json::to_value(&content).unwrap();
+        let parts = json.as_array().expect("system content should be an array");
+        assert_eq!(parts.len(), 1, "empty prefix collapses to single block");
+
+        assert_eq!(parts[0]["text"], "WHOLE");
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn system_message_with_whitespace_only_stable_prefix_falls_back_to_single_block() {
+        // A whitespace-only prefix would emit a whitespace-only stable block
+        // that defeats prefix caching. `concatenated_content` in traits.rs also
+        // treats whitespace-only as empty via `trim_end()` — this keeps the
+        // two code paths consistent (testing T-001, correctness COR-002).
+        let content = OpenRouterProvider::system_message_content(Some("   \n"), "WHOLE");
+        let json = serde_json::to_value(&content).unwrap();
+        let parts = json.as_array().unwrap();
+        assert_eq!(
+            parts.len(),
+            1,
+            "whitespace-only prefix collapses to single block"
+        );
+        assert_eq!(parts[0]["text"], "WHOLE");
+    }
+
+    #[test]
+    fn system_message_blocks_preserve_stable_then_dynamic_order() {
+        // Cache breakpoint must sit AFTER stable bytes — stable block first,
+        // dynamic block second. Reversing the order would defeat the purpose
+        // because OpenRouter's prefix cache lookup fails on any byte change
+        // before the cache_control marker.
+        let content =
+            OpenRouterProvider::system_message_content(Some("STABLE_FIRST"), "DYNAMIC_SECOND");
+        let json = serde_json::to_value(&content).unwrap();
+        let parts = json.as_array().unwrap();
+
+        assert_eq!(parts[0]["text"], "STABLE_FIRST");
+        assert!(parts[0].get("cache_control").is_some());
+        assert_eq!(parts[1]["text"], "DYNAMIC_SECOND");
+    }
+
+    #[test]
+    fn convert_messages_system_with_stable_prefix_emits_two_blocks() {
+        // End-to-end: ChatMessage with stable_prefix → convert_messages →
+        // NativeMessage[0].content is a 2-block Parts array with cache_control
+        // only on block 0. This is the test that would have caught the
+        // production bug (cache_read_input_tokens always 0).
+        let messages = vec![
+            ChatMessage::system_with_stable_prefix("STABLE", "DYNAMIC"),
+            ChatMessage::user("Hi"),
+        ];
+        let native = OpenRouterProvider::convert_messages(&messages);
+        assert_eq!(native.len(), 2);
+
+        let sys_json = serde_json::to_value(&native[0].content).unwrap();
+        let parts = sys_json.as_array().expect("system content should be array");
+        assert_eq!(parts.len(), 2, "stable_prefix should produce 2 blocks");
+        assert_eq!(parts[0]["text"], "STABLE");
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(parts[1]["text"], "DYNAMIC");
+        assert!(parts[1].get("cache_control").is_none());
+
+        // User message unchanged — plain string
+        let user_json = serde_json::to_value(&native[1].content).unwrap();
+        assert!(user_json.is_string());
+    }
+
+    #[test]
+    fn convert_messages_applies_stable_prefix_per_system_message() {
+        // Defensive: OpenRouter allows multiple system messages and applies
+        // stable_prefix per-message, unlike Anthropic which captures only the
+        // first. Guards against accidental refactor to "first system only".
+        let messages = vec![
+            ChatMessage::system("first plain"),
+            ChatMessage::system_with_stable_prefix("second-stable", "second-dynamic"),
+            ChatMessage::user("Hi"),
+        ];
+        let native = OpenRouterProvider::convert_messages(&messages);
+        assert_eq!(native.len(), 3);
+
+        // First system: 1 block (no stable_prefix)
+        let first = serde_json::to_value(&native[0].content).unwrap();
+        let first_parts = first.as_array().unwrap();
+        assert_eq!(first_parts.len(), 1);
+        assert_eq!(first_parts[0]["text"], "first plain");
+
+        // Second system: 2 blocks (stable_prefix set)
+        let second = serde_json::to_value(&native[1].content).unwrap();
+        let second_parts = second.as_array().unwrap();
+        assert_eq!(second_parts.len(), 2);
+        assert_eq!(second_parts[0]["text"], "second-stable");
+        assert_eq!(second_parts[1]["text"], "second-dynamic");
+    }
+
+    #[test]
+    fn chat_request_body_contains_split_system_blocks_when_stable_prefix_set() {
+        // Integration: serialize a full request body and assert the on-wire
+        // shape. This is the test that would have caught the production bug
+        // (cache_read_input_tokens always 0) end-to-end.
+        let messages = vec![
+            ChatMessage::system_with_stable_prefix("STABLE_BYTES", "DYNAMIC_BYTES"),
+            ChatMessage::user("Hello"),
+        ];
+        let native = OpenRouterProvider::convert_messages(&messages);
+        let request = NativeChatRequest {
+            model: "test-model".to_string(),
+            messages: native,
+            temperature: 0.0,
+            tools: None,
+            tool_choice: None,
+            max_tokens: None,
+        };
+        let body = serde_json::to_value(&request).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+
+        // First message: system with split content
+        assert_eq!(messages[0]["role"], "system");
+        let parts = messages[0]["content"].as_array().unwrap();
+        assert_eq!(
+            parts.len(),
+            2,
+            "system must serialize as 2 blocks on the wire"
+        );
+        assert_eq!(parts[0]["text"], "STABLE_BYTES");
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(parts[1]["text"], "DYNAMIC_BYTES");
+        assert!(parts[1].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn convert_messages_user_assistant_tool_unchanged_when_stable_prefix_present() {
+        // ChatMessage allows stable_prefix on any role structurally. For
+        // non-system roles it must be silently ignored — serialization
+        // byte-identical to the no-prefix case.
+        let with_prefix = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: "U".into(),
+                stable_prefix: Some("ignored".into()),
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "A".into(),
+                stable_prefix: Some("ignored".into()),
+            },
+        ];
+        let without_prefix = vec![ChatMessage::user("U"), ChatMessage::assistant("A")];
+
+        let with = OpenRouterProvider::convert_messages(&with_prefix);
+        let without = OpenRouterProvider::convert_messages(&without_prefix);
+
+        assert_eq!(
+            serde_json::to_value(&with).unwrap(),
+            serde_json::to_value(&without).unwrap(),
+            "stable_prefix on non-system roles must not affect serialization"
+        );
+    }
+
+    #[test]
+    fn to_history_message_system_with_stable_prefix_emits_two_blocks() {
+        // chat_with_history builds legacy Message structs via to_history_message.
+        // Before the fix, system messages on this path went through
+        // to_message_content and lost cache_control — a silent regression that
+        // reviewers (api-contract ACR-001, adversarial ADV-001) caught.
+        let msg = ChatMessage::system_with_stable_prefix("STABLE", "DYNAMIC");
+        let api = OpenRouterProvider::to_history_message(&msg);
+        assert_eq!(api.role, "system");
+
+        let json = serde_json::to_value(&api.content).unwrap();
+        let parts = json.as_array().expect("system must serialize as Parts");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], "STABLE");
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(parts[1]["text"], "DYNAMIC");
+        assert!(parts[1].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn to_history_message_system_without_stable_prefix_emits_single_cached_block() {
+        let msg = ChatMessage::system("WHOLE");
+        let api = OpenRouterProvider::to_history_message(&msg);
+        let json = serde_json::to_value(&api.content).unwrap();
+        let parts = json.as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["text"], "WHOLE");
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn to_history_message_user_serializes_as_plain_string() {
+        let msg = ChatMessage::user("Hi");
+        let api = OpenRouterProvider::to_history_message(&msg);
+        let json = serde_json::to_value(&api.content).unwrap();
+        assert!(json.is_string());
+        assert_eq!(json.as_str().unwrap(), "Hi");
+    }
+
+    #[test]
+    fn system_message_dynamic_block_omits_cache_control_field() {
+        // The dynamic block's cache_control must be absent from the serialized
+        // JSON (not just `null`) — relies on `skip_serializing_if` on
+        // `MessagePart::Text::cache_control`. If the field were present the
+        // OpenRouter API would treat it as a second cache breakpoint, which
+        // would invalidate the prefix cache on every dynamic-content change.
+        let content = OpenRouterProvider::system_message_content(Some("S"), "D");
+        let json = serde_json::to_value(&content).unwrap();
+        let parts = json.as_array().unwrap();
+
+        assert!(
+            parts[1].get("cache_control").is_none(),
+            "dynamic block must NOT carry cache_control: got {parts:?}"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
