@@ -266,16 +266,10 @@ impl Observer for OtelObserver {
                 // and the granular gen_ai.usage.cache_{read,creation}_input_tokens
                 // breakdown so Langfuse can compute cache pricing correctly.
                 if let Some(it) = input_tokens {
-                    span_attrs.push(KeyValue::new(
-                        "gen_ai.usage.input_tokens",
-                        *it as i64,
-                    ));
+                    span_attrs.push(KeyValue::new("gen_ai.usage.input_tokens", *it as i64));
                 }
                 if let Some(ot) = output_tokens {
-                    span_attrs.push(KeyValue::new(
-                        "gen_ai.usage.output_tokens",
-                        *ot as i64,
-                    ));
+                    span_attrs.push(KeyValue::new("gen_ai.usage.output_tokens", *ot as i64));
                 }
                 if let Some(cr) = cache_read_input_tokens {
                     span_attrs.push(KeyValue::new(
@@ -306,10 +300,7 @@ impl Observer for OtelObserver {
                 // Full system prompt — single attribute (not an array)
                 // matching OTel's gen_ai.system_instructions convention.
                 if let Some(sp) = system_prompt {
-                    span_attrs.push(KeyValue::new(
-                        "gen_ai.system_instructions",
-                        sp.clone(),
-                    ));
+                    span_attrs.push(KeyValue::new("gen_ai.system_instructions", sp.clone()));
                 }
 
                 // Full input messages — JSON-encoded array of {role, content}
@@ -331,10 +322,7 @@ impl Observer for OtelObserver {
                 )
                 .unwrap_or_else(|_| "[]".to_string());
                 if input_messages_json != "[]" {
-                    span_attrs.push(KeyValue::new(
-                        "gen_ai.input.messages",
-                        input_messages_json,
-                    ));
+                    span_attrs.push(KeyValue::new("gen_ai.input.messages", input_messages_json));
                 }
 
                 // Tool definitions — JSON-encoded array. Langfuse renders
@@ -396,9 +384,12 @@ impl Observer for OtelObserver {
                         serde_json::Value::Array(tool_calls_json),
                     );
                 }
-                let output_messages_json = serde_json::to_string(&vec![output_msg])
-                    .unwrap_or_else(|_| "[]".to_string());
-                span_attrs.push(KeyValue::new("gen_ai.output.messages", output_messages_json));
+                let output_messages_json =
+                    serde_json::to_string(&vec![output_msg]).unwrap_or_else(|_| "[]".to_string());
+                span_attrs.push(KeyValue::new(
+                    "gen_ai.output.messages",
+                    output_messages_json,
+                ));
 
                 let mut span = tracer.build(
                     opentelemetry::trace::SpanBuilder::from_name("llm.call")
@@ -490,19 +481,13 @@ impl Observer for OtelObserver {
                     span_attrs.push(KeyValue::new("gen_ai.tool.call.id", id.clone()));
                 }
                 if let Some(args) = arguments {
-                    span_attrs.push(KeyValue::new(
-                        "gen_ai.tool.arguments",
-                        args.clone(),
-                    ));
+                    span_attrs.push(KeyValue::new("gen_ai.tool.arguments", args.clone()));
                     // Also stash as Langfuse-native input field so the UI
                     // shows it in the Input pane.
                     span_attrs.push(KeyValue::new("input.value", args.clone()));
                 }
                 if let Some(res) = result {
-                    span_attrs.push(KeyValue::new(
-                        "gen_ai.tool.result",
-                        res.clone(),
-                    ));
+                    span_attrs.push(KeyValue::new("gen_ai.tool.result", res.clone()));
                     span_attrs.push(KeyValue::new("output.value", res.clone()));
                 }
 

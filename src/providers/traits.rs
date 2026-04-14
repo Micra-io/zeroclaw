@@ -578,7 +578,13 @@ pub trait Provider: Send + Sync {
             .rfind(|m| m.role == "user")
             .map(|m| m.content.as_str())
             .unwrap_or("");
-        self.stream_chat_with_system(system_owned.as_deref(), last_user, model, temperature, options)
+        self.stream_chat_with_system(
+            system_owned.as_deref(),
+            last_user,
+            model,
+            temperature,
+            options,
+        )
     }
 
     /// Structured streaming chat interface.

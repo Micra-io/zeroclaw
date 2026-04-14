@@ -2093,12 +2093,14 @@ async fn consume_provider_streaming_response(
             StreamEvent::Usage(usage) => {
                 // Merge streaming usage events (input from message_start,
                 // output from message_delta) into the accumulated usage.
-                let u = outcome.usage.get_or_insert(crate::providers::traits::TokenUsage {
-                    input_tokens: None,
-                    output_tokens: None,
-                    cached_input_tokens: None,
-                    ..Default::default()
-                });
+                let u = outcome
+                    .usage
+                    .get_or_insert(crate::providers::traits::TokenUsage {
+                        input_tokens: None,
+                        output_tokens: None,
+                        cached_input_tokens: None,
+                        ..Default::default()
+                    });
                 if let Some(input) = usage.input_tokens {
                     u.input_tokens = Some(input);
                 }
@@ -2750,9 +2752,8 @@ pub(crate) async fn run_tool_call_loop(
                 // calls) into the observer event so OTel exporters can emit
                 // gen_ai.output.messages and the tool call breakdown.
                 let resp_output_text = resp.text.clone();
-                let resp_output_tool_calls: Vec<
-                    crate::observability::traits::ToolCallSnapshot,
-                > = resp.tool_calls.iter().map(Into::into).collect();
+                let resp_output_tool_calls: Vec<crate::observability::traits::ToolCallSnapshot> =
+                    resp.tool_calls.iter().map(Into::into).collect();
 
                 observer.record_event(&ObserverEvent::LlmResponse {
                     provider: provider_name.to_string(),
@@ -3952,7 +3953,9 @@ pub async fn run(
 
     // Append structured tool-use instructions with schemas (only for non-native providers)
     if !native_tools {
-        parts.stable.push_str(&build_tool_instructions(&tools_registry, Some(&i18n_descs)));
+        parts
+            .stable
+            .push_str(&build_tool_instructions(&tools_registry, Some(&i18n_descs)));
     }
 
     // Append deferred MCP tool names so the LLM knows what is available
@@ -4898,7 +4901,9 @@ pub async fn process_message(
         config.agent.max_system_prompt_chars,
     );
     if !native_tools {
-        parts.stable.push_str(&build_tool_instructions(&tools_registry, Some(&i18n_descs)));
+        parts
+            .stable
+            .push_str(&build_tool_instructions(&tools_registry, Some(&i18n_descs)));
     }
     if !deferred_section.is_empty() {
         parts.stable.push('\n');
@@ -5334,8 +5339,16 @@ mod tests {
             .expect("should produce a sample whose byte index 300 is not a char boundary");
 
         let observer = NoopObserver;
-        let result =
-            execute_one_tool("unknown_tool", call_arguments, None, &[], None, &observer, None).await;
+        let result = execute_one_tool(
+            "unknown_tool",
+            call_arguments,
+            None,
+            &[],
+            None,
+            &observer,
+            None,
+        )
+        .await;
         assert!(result.is_ok(), "execute_one_tool should not panic or error");
 
         let outcome = result.unwrap();
@@ -8980,7 +8993,11 @@ Let me check the result."#;
         trim_history(&mut history, max, true);
 
         // Exactly at 2*max non-system → still no trim in chunked mode.
-        assert_eq!(history.len(), 1 + 2 * max, "chunked mode must not trim at exactly 2*max");
+        assert_eq!(
+            history.len(),
+            1 + 2 * max,
+            "chunked mode must not trim at exactly 2*max"
+        );
         assert_eq!(history[0].role, "system");
     }
 
@@ -8998,7 +9015,11 @@ Let me check the result."#;
         trim_history(&mut history, max, true);
 
         // System preserved, non-system trimmed back down to exactly `max`.
-        assert_eq!(history.len(), 1 + max, "chunked mode must drain down to max");
+        assert_eq!(
+            history.len(),
+            1 + max,
+            "chunked mode must drain down to max"
+        );
         assert_eq!(history[0].role, "system");
         // The oldest surviving non-system message is `msg (max + 1)` —
         // the `max + 1` oldest entries were dropped.
@@ -9026,7 +9047,9 @@ Let me check the result."#;
         // Append turns one at a time up to (but not past) `2 * max` and
         // assert the oldest surviving non-system message stays byte-stable.
         for extra in 0..max {
-            history.push(crate::providers::ChatMessage::user(format!("extra {extra}")));
+            history.push(crate::providers::ChatMessage::user(format!(
+                "extra {extra}"
+            )));
             trim_history(&mut history, max, true);
             assert_eq!(
                 history[1].content, oldest_after_first_trim,

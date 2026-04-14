@@ -2470,7 +2470,7 @@ mod tests {
             None,
             Some("ns1"),
             None,
-                None,
+            None,
         )
         .await
         .unwrap();
@@ -2481,7 +2481,7 @@ mod tests {
             None,
             Some("ns2"),
             None,
-                None,
+            None,
         )
         .await
         .unwrap();
@@ -2572,7 +2572,7 @@ mod tests {
             Some("sess-a"),
             Some("ns1"),
             None,
-                None,
+            None,
         )
         .await
         .unwrap();
@@ -2583,7 +2583,7 @@ mod tests {
             Some("sess-a"),
             Some("ns2"),
             None,
-                None,
+            None,
         )
         .await
         .unwrap();
@@ -2594,7 +2594,7 @@ mod tests {
             None,
             Some("ns1"),
             None,
-                None,
+            None,
         )
         .await
         .unwrap();
@@ -2650,7 +2650,7 @@ mod tests {
             Some("sess-rt"),
             Some("ns-rt"),
             Some(0.9),
-                None,
+            None,
         )
         .await
         .unwrap();
