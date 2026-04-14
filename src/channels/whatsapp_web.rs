@@ -1934,7 +1934,6 @@ mod tests {
             crate::config::WhatsAppChatPolicy::default(),
             false,
             vec![], // allowed_groups
-            false,  // mention_only
             None,   // mention_name
             None,   // workspace_dir
         )
@@ -1969,7 +1968,6 @@ mod tests {
             crate::config::WhatsAppChatPolicy::default(),
             false,
             vec![], // allowed_groups
-            false,  // mention_only
             None,   // mention_name
             None,   // workspace_dir
         );
@@ -1991,7 +1989,6 @@ mod tests {
             crate::config::WhatsAppChatPolicy::default(),
             false,
             vec![], // allowed_groups
-            false,  // mention_only
             None,   // mention_name
             None,   // workspace_dir
         );

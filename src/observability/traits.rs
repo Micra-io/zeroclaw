@@ -378,6 +378,9 @@ mod tests {
             tool: "shell".into(),
             duration: Duration::from_millis(10),
             success: true,
+            tool_call_id: None,
+            arguments: None,
+            result: None,
         };
         let metric = ObserverMetric::RequestLatency(Duration::from_millis(8));
 
