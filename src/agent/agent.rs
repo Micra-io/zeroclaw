@@ -559,13 +559,17 @@ impl Agent {
             .build()
     }
 
+    /// Drop oldest non-system messages once the buffer has outgrown the
+    /// configured cap. Under chunked mode (default) the cap is a **soft
+    /// target**: no trim fires until non-system count crosses
+    /// `2 * max_history_messages`, then drains back to
+    /// `max_history_messages` in a single batch so the conversation
+    /// prefix stays byte-stable across `max_history_messages` turns and
+    /// the Anthropic message-level cache breakpoint survives. Legacy
+    /// mode (`history_trim_chunked = false`) fires per turn as soon as
+    /// non-system count exceeds `max_history_messages`.
     fn trim_history(&mut self) {
         let max = self.config.max_history_messages;
-        // Chunked mode (default): only fire when the buffer has grown to
-        // `2 * max`, then drain back to `max` in a single batch so the
-        // conversation prefix stays byte-stable for the next `max`
-        // turns. Legacy mode fires as soon as we exceed `max`, which
-        // invalidates the Anthropic message-level cache every turn.
         let threshold = if self.config.history_trim_chunked {
             max.saturating_mul(2)
         } else {
