@@ -122,11 +122,7 @@ pub(crate) fn estimate_history_tokens(history: &[ChatMessage]) -> usize {
 /// When `chunked` is false, `max_history` is a **strict cap**: trim fires
 /// every turn the count exceeds `max_history`, matching the pre-PR-#30
 /// behaviour.
-pub(crate) fn trim_history(
-    history: &mut Vec<ChatMessage>,
-    max_history: usize,
-    chunked: bool,
-) {
+pub(crate) fn trim_history(history: &mut Vec<ChatMessage>, max_history: usize, chunked: bool) {
     let has_system = history.first().map_or(false, |m| m.role == "system");
     let non_system_count = if has_system {
         history.len() - 1

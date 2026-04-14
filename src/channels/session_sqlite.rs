@@ -155,11 +155,7 @@ impl SqliteSessionBackend {
 
     /// Load the last `n` messages for a session key regardless of time, with timestamps.
     /// Results are returned in chronological order (oldest first).
-    pub fn load_last_n_with_time(
-        &self,
-        session_key: &str,
-        n: usize,
-    ) -> Vec<TimestampedMessage> {
+    pub fn load_last_n_with_time(&self, session_key: &str, n: usize) -> Vec<TimestampedMessage> {
         let conn = self.conn.lock();
         // Select in reverse order then reverse so we get the tail in chronological order.
         let mut stmt = match conn.prepare(

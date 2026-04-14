@@ -172,7 +172,10 @@ struct ChannelNotifyObserver {
 
 impl Observer for ChannelNotifyObserver {
     fn record_event(&self, event: &ObserverEvent) {
-        if let ObserverEvent::ToolCallStart { tool, arguments, .. } = event {
+        if let ObserverEvent::ToolCallStart {
+            tool, arguments, ..
+        } = event
+        {
             self.tools_used.store(true, Ordering::Relaxed);
             let detail = match arguments {
                 Some(args) if !args.is_empty() => {
@@ -1256,9 +1259,7 @@ fn refreshed_new_session_system_prompt(ctx: &ChannelRuntimeContext) -> String {
 /// `## Available Skills` section replaced for the new session (skills
 /// can change when the user runs `/new`). The `dynamic` half is a fresh
 /// `## Current Date & Time` + `## Runtime` block with `now`.
-fn refreshed_new_session_system_prompt_parts(
-    ctx: &ChannelRuntimeContext,
-) -> (String, String) {
+fn refreshed_new_session_system_prompt_parts(ctx: &ChannelRuntimeContext) -> (String, String) {
     let refreshed_skills = crate::skills::skills_to_prompt_with_mode(
         &crate::skills::load_skills_with_config(
             ctx.workspace_dir.as_ref(),
@@ -1273,10 +1274,7 @@ fn refreshed_new_session_system_prompt_parts(
         // monolithic path.
         replace_available_skills_section(ctx.system_prompt.as_str(), &refreshed_skills)
     } else {
-        replace_available_skills_section(
-            ctx.stable_system_prefix.as_str(),
-            &refreshed_skills,
-        )
+        replace_available_skills_section(ctx.stable_system_prefix.as_str(), &refreshed_skills)
     };
     let dynamic = build_dynamic_system_block(ctx.model.as_str());
     (stable, dynamic)
@@ -2915,7 +2913,10 @@ async fn process_channel_message(
     } else if split_active {
         refreshed_new_session_system_prompt_parts(ctx.as_ref())
     } else {
-        (String::new(), refreshed_new_session_system_prompt(ctx.as_ref()))
+        (
+            String::new(),
+            refreshed_new_session_system_prompt(ctx.as_ref()),
+        )
     };
 
     // The dynamic block carries everything that varies per turn:
@@ -2923,8 +2924,7 @@ async fn process_channel_message(
     // and (conditionally) group context. Decorating only the dynamic
     // block keeps the stable prefix byte-identical across turns so the
     // Anthropic cache breakpoint actually hits.
-    dynamic_block =
-        build_channel_system_prompt(&dynamic_block, &msg.channel, &msg.reply_target);
+    dynamic_block = build_channel_system_prompt(&dynamic_block, &msg.channel, &msg.reply_target);
     if !memory_context.is_empty() {
         let _ = write!(dynamic_block, "\n\n{memory_context}");
     }
@@ -2932,17 +2932,15 @@ async fn process_channel_message(
     // For group mentions, inject recent non-mention messages from the
     // observe store so the agent understands the conversation context.
     if msg.reply_target.ends_with("@g.us") {
-        let window = ctx.prompt_config.channels_config.group_context_window_minutes;
+        let window = ctx
+            .prompt_config
+            .channels_config
+            .group_context_window_minutes;
         let max_msgs = ctx.prompt_config.channels_config.group_context_max_messages;
         if window > 0 {
             if let Some(ref obs) = ctx.observe_store {
-                let group_context = load_group_context(
-                    obs,
-                    &msg.reply_target,
-                    window,
-                    max_msgs,
-                    2000,
-                );
+                let group_context =
+                    load_group_context(obs, &msg.reply_target, window, max_msgs, 2000);
                 if !group_context.is_empty() {
                     tracing::info!(
                         channel = %msg.channel,
@@ -12075,7 +12073,14 @@ This is an example JSON object for profile settings."#;
         let recent = now - chrono::Duration::minutes(5);
         {
             let conn_guard = store.conn.lock();
-            for (i, msg) in ["[+111] Hello everyone", "[+222] Anyone know a plumber?", "[+333] Try Pedro"].iter().enumerate() {
+            for (i, msg) in [
+                "[+111] Hello everyone",
+                "[+222] Anyone know a plumber?",
+                "[+333] Try Pedro",
+            ]
+            .iter()
+            .enumerate()
+            {
                 let ts = (recent + chrono::Duration::seconds(i as i64 * 60)).to_rfc3339();
                 conn_guard.execute(
                     "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, 'user', ?2, ?3)",
@@ -12181,9 +12186,7 @@ This is an example JSON object for profile settings."#;
     #[tokio::test]
     async fn process_channel_message_injects_group_context_for_mentions() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let observe = Arc::new(
-            session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap(),
-        );
+        let observe = Arc::new(session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap());
 
         // Seed observe store with recent group messages
         {
@@ -12309,9 +12312,7 @@ This is an example JSON object for profile settings."#;
     #[tokio::test]
     async fn process_channel_message_skips_group_context_for_dms() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let observe = Arc::new(
-            session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap(),
-        );
+        let observe = Arc::new(session_sqlite::SqliteSessionBackend::new(tmp.path()).unwrap());
 
         // Seed observe store with messages under a DM-style key (no @g.us)
         {

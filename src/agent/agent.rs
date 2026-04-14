@@ -628,7 +628,10 @@ impl Agent {
                     let outcome_text = if r.success {
                         r.output.clone()
                     } else {
-                        format!("Error: {}", r.error.clone().unwrap_or_else(|| r.output.clone()))
+                        format!(
+                            "Error: {}",
+                            r.error.clone().unwrap_or_else(|| r.output.clone())
+                        )
                     };
                     self.observer.record_event(&ObserverEvent::ToolCall {
                         tool: call.name.clone(),
@@ -662,7 +665,10 @@ impl Agent {
                         let outcome_text = if r.success {
                             r.output.clone()
                         } else {
-                            format!("Error: {}", r.error.clone().unwrap_or_else(|| r.output.clone()))
+                            format!(
+                                "Error: {}",
+                                r.error.clone().unwrap_or_else(|| r.output.clone())
+                            )
                         };
                         self.observer.record_event(&ObserverEvent::ToolCall {
                             tool: call.name.clone(),
