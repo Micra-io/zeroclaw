@@ -1065,7 +1065,9 @@ impl Channel for WhatsAppWebChannel {
             ..Default::default()
         };
 
-        let message_id = client.send_message(to, outgoing).await?;
+        // Box::pin the large future (~34KB) so it doesn't inflate the
+        // enclosing Send future's stack slot — clippy::large_futures.
+        let message_id = Box::pin(client.send_message(to, outgoing)).await?;
         tracing::debug!(
             "WhatsApp Web: sent text to {} (id: {})",
             message.recipient,
@@ -1114,7 +1116,7 @@ impl Channel for WhatsAppWebChannel {
                 tracing::info!(
                     "WhatsApp Web: no existing session, new device will be created during pairing"
                 );
-            };
+            }
 
             // Create transport factory
             let mut transport_factory = TokioWebSocketTransportFactory::new();
@@ -1561,7 +1563,7 @@ impl Channel for WhatsAppWebChannel {
                                         // resolved phone JID (see above).
                                         reply_target,
                                         content,
-                                        timestamp: chrono::Utc::now().timestamp() as u64,
+                                        timestamp: chrono::Utc::now().timestamp().cast_unsigned(),
                                         thread_ts: None,
                                         interruption_scope_id: None,
                     attachments: vec![],
@@ -2074,7 +2076,7 @@ mod tests {
         // attempt 1 → 3s, 2 → 6s, 3 → 12s, … 7 → 192s, 8 → 300s (capped)
         let expected = [3, 6, 12, 24, 48, 96, 192, 300, 300, 300];
         for (i, &want) in expected.iter().enumerate() {
-            let attempt = (i + 1) as u32;
+            let attempt = u32::try_from(i + 1).expect("test index within u32 range");
             assert_eq!(
                 WhatsAppWebChannel::compute_retry_delay(attempt),
                 want,

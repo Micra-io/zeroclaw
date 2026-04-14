@@ -9008,7 +9008,7 @@ Let me check the result."#;
     fn trim_history_chunked_fires_above_double_threshold() {
         let max = 10;
         let mut history = vec![crate::providers::ChatMessage::system("sys")];
-        for i in 0..(2 * max + 1) {
+        for i in 0..=(2 * max) {
             history.push(crate::providers::ChatMessage::user(format!("msg {i}")));
         }
 
@@ -9035,7 +9035,7 @@ Let me check the result."#;
     fn trim_history_chunked_oldest_stable_between_trims() {
         let max = 4;
         let mut history = vec![crate::providers::ChatMessage::system("sys")];
-        for i in 0..(2 * max + 1) {
+        for i in 0..=(2 * max) {
             history.push(crate::providers::ChatMessage::user(format!("msg {i}")));
         }
 
@@ -9065,7 +9065,7 @@ Let me check the result."#;
     fn trim_history_legacy_per_turn_behaviour() {
         let max = 10;
         let mut history = vec![crate::providers::ChatMessage::system("sys")];
-        for i in 0..(max + 1) {
+        for i in 0..=max {
             history.push(crate::providers::ChatMessage::user(format!("msg {i}")));
         }
 
