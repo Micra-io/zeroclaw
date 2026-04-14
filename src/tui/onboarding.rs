@@ -3391,6 +3391,8 @@ mod tests {
         config.channels_config.telegram = Some(TelegramConfig {
             bot_token: "REAL_TOKEN_123".to_string(),
             allowed_users: vec!["alice".to_string()],
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
             stream_mode: StreamMode::default(),
             draft_update_interval_ms: 1000,
             interrupt_on_new_message: false,

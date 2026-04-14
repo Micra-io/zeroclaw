@@ -56,6 +56,9 @@ mod tests {
             tool: "shell".into(),
             duration: Duration::from_secs(1),
             success: true,
+            tool_call_id: None,
+            arguments: None,
+            result: None,
         });
         obs.record_event(&ObserverEvent::ChannelMessage {
             channel: "cli".into(),
