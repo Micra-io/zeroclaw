@@ -78,7 +78,8 @@ Operational note for container users:
 |---|---|---|
 | `compact_context` | `true` | When true: bootstrap_max_chars=6000, rag_chunk_limit=2. Use for 13B or smaller models |
 | `max_tool_iterations` | `10` | Maximum tool-call loop turns per user message across CLI, gateway, and channels |
-| `max_history_messages` | `50` | Maximum conversation history messages retained per session |
+| `max_history_messages` | `50` | Soft target for conversation history length per session. Under the default `history_trim_chunked = true`, the buffer is allowed to grow to `2 * max_history_messages` non-system messages before a single batched drain fires and drops back to `max_history_messages` — keeping the conversation prefix byte-stable so the Anthropic message-level cache breakpoint survives across turns. Flip `history_trim_chunked = false` for a strict per-turn cap. |
+| `history_trim_chunked` | `true` | When true (default), trim fires in a single batch once non-system message count crosses `2 * max_history_messages`; preserves the Anthropic message-level prompt-cache prefix across turns. When false, trim fires on every turn that exceeds `max_history_messages` (pre-v0.6 behaviour). |
 | `parallel_tools` | `false` | Enable parallel tool execution within a single iteration |
 | `tool_dispatcher` | `auto` | Tool dispatch strategy |
 | `tool_call_dedup_exempt` | `[]` | Tool names exempt from within-turn duplicate-call suppression |
