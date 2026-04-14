@@ -1311,6 +1311,12 @@ fn default_local_whisper_timeout_secs() -> u64 {
 }
 
 /// Agent orchestration configuration (`[agent]` section).
+// AgentConfig intentionally carries several independent boolean toggles
+// (`compact_context`, `history_trim_chunked`, `parallel_tools`,
+// `context_aware_tools`, ...). These are orthogonal user-facing switches,
+// not a state machine — refactoring them into an enum would obscure the
+// config surface without simplifying runtime logic.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AgentConfig {
     /// When true: bootstrap_max_chars=6000, rag_chunk_limit=2. Use for 13B or smaller models.

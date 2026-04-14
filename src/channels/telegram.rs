@@ -5582,7 +5582,7 @@ mod tests {
                 "message_id": 1,
                 "text": "hello",
                 "from": { "id": 1, "username": "alice" },
-                "chat": { "id": -100999, "type": "supergroup" }
+                "chat": { "id": -100_999, "type": "supergroup" }
             }
         });
         assert!(ch.parse_update_message(&update).is_some());
@@ -5602,7 +5602,7 @@ mod tests {
                 "message_id": 1,
                 "text": "hello",
                 "from": { "id": 1, "username": "alice" },
-                "chat": { "id": -100999, "type": "supergroup" }
+                "chat": { "id": -100_999, "type": "supergroup" }
             }
         });
         assert!(ch.parse_update_message(&update).is_some());
@@ -5662,7 +5662,7 @@ mod tests {
                 "message_id": 1,
                 "text": "hello",
                 "from": { "id": 999, "username": "bob" },
-                "chat": { "id": -100999, "type": "supergroup" }
+                "chat": { "id": -100_999, "type": "supergroup" }
             }
         });
         assert!(ch.parse_update_message(&update).is_some());
