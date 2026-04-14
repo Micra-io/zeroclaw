@@ -198,6 +198,12 @@ impl Observer for OtelObserver {
     fn record_event(&self, event: &ObserverEvent) {
         let tracer = global::tracer("zeroclaw");
 
+        // Two match arms are deliberately empty for different reasons:
+        // the LlmRequest/ToolCallStart/TurnComplete/Cache{Hit,Miss} arm
+        // folds those events into paired response/metric spans, while the
+        // DORA Deployment* arm is a TODO for future OTel pass-through.
+        // Merging them loses that semantic grouping.
+        #[allow(clippy::match_same_arms)]
         match event {
             ObserverEvent::AgentStart { provider, model } => {
                 self.agent_starts.add(
