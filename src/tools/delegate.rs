@@ -1056,12 +1056,14 @@ impl DelegateTool {
             autonomy_level: crate::security::AutonomyLevel::default(),
         };
 
+        // STORY-011 Increment 3: `DateTimeSection` was removed. The delegate
+        // agent inherits the parent's entry-path timestamp injection and no
+        // longer needs a per-call system-prompt date section.
         let builder = SystemPromptBuilder::default()
             .add_section(Box::new(crate::agent::prompt::ToolsSection))
             .add_section(Box::new(crate::agent::prompt::SafetySection))
             .add_section(Box::new(crate::agent::prompt::SkillsSection))
-            .add_section(Box::new(crate::agent::prompt::WorkspaceSection))
-            .add_section(Box::new(crate::agent::prompt::DateTimeSection));
+            .add_section(Box::new(crate::agent::prompt::WorkspaceSection));
 
         let mut enriched = builder.build(&ctx).unwrap_or_default();
 
