@@ -9159,7 +9159,12 @@ BTC is currently around $65,000 based on latest tool output."#
         let tools = vec![("shell", "Run commands"), ("file_read", "Read files")];
         let prompt = build_system_prompt(ws.path(), "test-model", &tools, &[], None, None);
 
-        // Section headers
+        // Section headers — the stable prefix carries identity, tools, safety,
+        // skills, workspace, project context, channel capabilities, and host
+        // environment. STORY-011 removed `## Current Date & Time` and
+        // `## Runtime` from the system message; both now live in the
+        // user-message preamble instead (Phase B wires `## Host Environment`
+        // + the user-facing `Model:` label; first-turn `[{now}]` prefix stays).
         assert!(prompt.contains("## Tools"), "missing Tools section");
         assert!(prompt.contains("## Safety"), "missing Safety section");
         assert!(prompt.contains("## Workspace"), "missing Workspace section");
@@ -9168,10 +9173,17 @@ BTC is currently around $65,000 based on latest tool output."#
             "missing Project Context"
         );
         assert!(
-            prompt.contains("## Current Date & Time"),
-            "missing Date/Time"
+            !prompt.contains("## Current Date & Time"),
+            "STORY-011: Date/Time must not appear in the system prompt; got:\n{prompt}"
         );
-        assert!(prompt.contains("## Runtime"), "missing Runtime section");
+        assert!(
+            !prompt.contains("## Runtime"),
+            "STORY-011: `## Runtime` must not appear in the system prompt (Host/OS moved to `## Host Environment`, Model moves to user preamble in Phase B); got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("## Host Environment"),
+            "missing `## Host Environment` section (replacement for stable Host/OS fields); got:\n{prompt}"
+        );
     }
 
     // STORY-011 Increment 1: the per-turn dynamic block must not carry a
