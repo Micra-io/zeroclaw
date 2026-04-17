@@ -680,22 +680,23 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
     }
 }
 
-/// Build the per-turn dynamic system block: `## Current Date & Time`
-/// followed by `## Runtime`. This is the byte-volatile portion of the
-/// system prompt that lives **after** the Anthropic cache breakpoint, so
-/// the stable prefix (identity, tools, safety, skills, bootstrap) can be
-/// served from the prefix cache while the timestamps and runtime info
-/// are re-sent on every call.
-fn build_dynamic_system_block(model: &str) -> String {
-    let now = chrono::Local::now();
-    let host =
-        hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
-    format!(
-        "## Current Date & Time\n\n{} ({})\n\n## Runtime\n\nHost: {host} | OS: {} | Model: {model}\n",
-        now.format("%Y-%m-%d %H:%M:%S"),
-        now.format("%Z"),
-        std::env::consts::OS,
-    )
+/// Build the per-turn dynamic system block.
+///
+/// STORY-011 Increments 1 & 4: this block carries no per-call content
+/// anymore. `## Current Date & Time` moved to the user-message preamble
+/// (Phase B); `## Runtime` split — Host+OS to the stable prefix,
+/// `Model:` to the user preamble. Implicit-caching providers need a
+/// byte-identical prefix across requests, so any timestamp or mutable
+/// runtime value inside the system message invalidates the cache on
+/// every call.
+///
+/// The function returns an empty string today. It's kept (rather than
+/// inlined) so that Phase B and future stories have a well-known hook
+/// for injecting new per-turn content if needed, without having to
+/// restructure the `build_channel_system_prompt` / `process_channel_message`
+/// call sites that feed it into `ChatMessage::system_with_stable_prefix`.
+fn build_dynamic_system_block(_model: &str) -> String {
+    String::new()
 }
 
 /// Append channel-specific instructions and a per-conversation
@@ -2776,12 +2777,32 @@ async fn process_channel_message(
             .is_some_and(|turns| !turns.is_empty())
     };
 
+    // Enrich the current user-turn content with a `[{now} | model={m}]`
+    // preamble so both the per-turn timestamp and the active model name
+    // live in the user message rather than the system block. Keeping
+    // these out of the system block preserves a byte-identical stable
+    // prefix across turns on implicit-caching providers
+    // (Qwen/DeepSeek/Groq/OpenAI/Moonshot). Memory recall below still
+    // queries on raw `msg.content` so the retrieval vector isn't polluted
+    // by the preamble.
+    let now_for_user_turn = crate::agent::user_message::format_now();
+    let enriched_user_content = crate::agent::user_message::enrich_user_message(
+        &now_for_user_turn,
+        route.model.as_str(),
+        &msg.content,
+        "",
+    );
+
     // Preserve user turn before the LLM call so interrupted requests keep context.
-    append_sender_turn(ctx.as_ref(), &history_key, ChatMessage::user(&msg.content));
+    append_sender_turn(
+        ctx.as_ref(),
+        &history_key,
+        ChatMessage::user(&enriched_user_content),
+    );
 
     // Build history from per-sender conversation cache.
     let prior_turns_raw = if force_fresh_session {
-        vec![ChatMessage::user(&msg.content)]
+        vec![ChatMessage::user(&enriched_user_content)]
     } else {
         ctx.conversation_histories
             .lock()
@@ -3653,7 +3674,11 @@ async fn process_channel_message(
                 );
                 let should_rollback_user_turn = should_rollback_failed_user_turn(&e);
                 let rolled_back = should_rollback_user_turn
-                    && rollback_orphan_user_turn(ctx.as_ref(), &history_key, &msg.content);
+                    && rollback_orphan_user_turn(
+                        ctx.as_ref(),
+                        &history_key,
+                        &enriched_user_content,
+                    );
 
                 if !rolled_back {
                     // Close the orphan user turn so subsequent messages don't
@@ -4245,9 +4270,12 @@ pub fn build_system_prompt_parts_with_mode_and_autonomy(
     }
 
     // ── Truncation (max_system_prompt_chars budget) ────────────
-    // Applied to the stable block only. The dynamic suffix is tiny (<1KB)
-    // and must not be truncated because it carries Date & Time / Runtime
-    // context the model relies on for "today" questions.
+    // Applied to the stable block's bootstrap content. STORY-011 post-fix:
+    // the dynamic suffix is now empty (all per-call content moved to the
+    // user-message preamble), and the sections appended below — Channel
+    // Capabilities (config-driven, daemon-stable) and Host Environment
+    // (env-constant) — are also stable and added AFTER this truncation so
+    // they survive even when the bootstrap is clipped.
     if max_system_prompt_chars > 0 && stable.len() > max_system_prompt_chars {
         // Truncate on a char boundary, keeping the top portion (identity + safety).
         let mut end = max_system_prompt_chars;
@@ -4259,19 +4287,17 @@ pub fn build_system_prompt_parts_with_mode_and_autonomy(
         stable.push_str("\n\n[System prompt truncated to fit context budget]\n");
     }
 
-    // ── Dynamic suffix ─────────────────────────────────────────
-    // Channel Capabilities, Date & Time, and Runtime change (or could
-    // change) per call and must live *after* the cache breakpoint so the
-    // stable prefix hash survives across invocations.
-    let mut dynamic = String::with_capacity(1024);
-
-    // ── 8. Channel Capabilities (skipped in compact_context mode) ──
+    // ── 8. Channel Capabilities (STORY-011 AC #8: moved from dynamic → stable)
+    // Content branches on `autonomy_config.level` and `compact_context`, both
+    // of which are daemon-restart-stable. Placing this block in the stable
+    // prefix (and after truncation) keeps it in every request while letting
+    // implicit-caching providers see a byte-identical prefix across calls.
     if !compact_context {
-        dynamic.push_str("## Channel Capabilities\n\n");
-        dynamic.push_str("- You are running as a messaging bot. Your response is automatically sent back to the user's channel.\n");
-        dynamic
+        stable.push_str("## Channel Capabilities\n\n");
+        stable.push_str("- You are running as a messaging bot. Your response is automatically sent back to the user's channel.\n");
+        stable
             .push_str("- You do NOT need to ask permission to respond — just respond directly.\n");
-        dynamic.push_str(match autonomy_config.map(|cfg| cfg.level) {
+        stable.push_str(match autonomy_config.map(|cfg| cfg.level) {
         Some(crate::security::AutonomyLevel::Full) => {
             "- If the runtime policy already allows a tool, use it directly; do not ask the user for extra approval.\n\
              - Never pretend you are waiting for a human approval click or confirmation when the runtime policy already permits the action.\n\
@@ -4285,29 +4311,31 @@ pub fn build_system_prompt_parts_with_mode_and_autonomy(
              - If there is no approval path for this channel or the runtime blocks an action, explain that restriction directly instead of simulating an approval flow.\n"
         }
     });
-        dynamic.push_str("- NEVER repeat, describe, or echo credentials, tokens, API keys, or secrets in your responses.\n");
-        dynamic.push_str("- If a tool output contains credentials, they have already been redacted — do not mention them.\n");
-        dynamic.push_str("- When a user sends a voice note, it is automatically transcribed to text. Your text reply is automatically converted to a voice note and sent back. Do NOT attempt to generate audio yourself — TTS is handled by the channel.\n");
-        dynamic.push_str("- NEVER narrate or describe your tool usage. Do NOT say 'Let me fetch...', 'I will use...', 'Searching...', or similar. Give the FINAL ANSWER only — no intermediate steps, no tool mentions, no progress updates.\n\n");
+        stable.push_str("- NEVER repeat, describe, or echo credentials, tokens, API keys, or secrets in your responses.\n");
+        stable.push_str("- If a tool output contains credentials, they have already been redacted — do not mention them.\n");
+        stable.push_str("- When a user sends a voice note, it is automatically transcribed to text. Your text reply is automatically converted to a voice note and sent back. Do NOT attempt to generate audio yourself — TTS is handled by the channel.\n");
+        stable.push_str("- NEVER narrate or describe your tool usage. Do NOT say 'Let me fetch...', 'I will use...', 'Searching...', or similar. Give the FINAL ANSWER only — no intermediate steps, no tool mentions, no progress updates.\n\n");
     }
 
-    // ── 6. Date & Time ──────────────────────────────────────────
-    let now = chrono::Local::now();
-    let _ = writeln!(
-        dynamic,
-        "## Current Date & Time\n\n{} ({})\n",
-        now.format("%Y-%m-%d %H:%M:%S"),
-        now.format("%Z")
-    );
-
-    // ── 7. Runtime ──────────────────────────────────────────────
+    // ── 9. Host Environment (STORY-011 AC #8: split from Runtime) ──
+    // Host + OS are env-constant (daemon-restart-stable). Model is mutable
+    // mid-session via `/model` and therefore NOT included here — Phase B
+    // injects it via the user-message preamble so cache bytes don't shift
+    // when the active model changes.
     let host =
         hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
     let _ = writeln!(
-        dynamic,
-        "## Runtime\n\nHost: {host} | OS: {} | Model: {model_name}\n",
+        stable,
+        "## Host Environment\n\nHost: {host} | OS: {}\n",
         std::env::consts::OS,
     );
+
+    // ── Dynamic suffix ─────────────────────────────────────────
+    // STORY-011: empty by design. Per-call content (timestamp, model name)
+    // lives in the user-message preamble so the stable prefix stays
+    // byte-identical across turns for implicit-caching providers.
+    let _ = model_name; // unused now that Model: moves to user preamble
+    let dynamic = String::new();
 
     if stable.is_empty() && dynamic.is_empty() {
         return SystemPromptParts {
@@ -9155,7 +9183,12 @@ BTC is currently around $65,000 based on latest tool output."#
         let tools = vec![("shell", "Run commands"), ("file_read", "Read files")];
         let prompt = build_system_prompt(ws.path(), "test-model", &tools, &[], None, None);
 
-        // Section headers
+        // Section headers — the stable prefix carries identity, tools, safety,
+        // skills, workspace, project context, channel capabilities, and host
+        // environment. STORY-011 removed `## Current Date & Time` and
+        // `## Runtime` from the system message; both now live in the
+        // user-message preamble instead (Phase B wires `## Host Environment`
+        // + the user-facing `Model:` label; first-turn `[{now}]` prefix stays).
         assert!(prompt.contains("## Tools"), "missing Tools section");
         assert!(prompt.contains("## Safety"), "missing Safety section");
         assert!(prompt.contains("## Workspace"), "missing Workspace section");
@@ -9164,10 +9197,173 @@ BTC is currently around $65,000 based on latest tool output."#
             "missing Project Context"
         );
         assert!(
-            prompt.contains("## Current Date & Time"),
-            "missing Date/Time"
+            !prompt.contains("## Current Date & Time"),
+            "STORY-011: Date/Time must not appear in the system prompt; got:\n{prompt}"
         );
-        assert!(prompt.contains("## Runtime"), "missing Runtime section");
+        assert!(
+            !prompt.contains("## Runtime"),
+            "STORY-011: `## Runtime` must not appear in the system prompt (Host/OS moved to `## Host Environment`, Model moves to user preamble in Phase B); got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("## Host Environment"),
+            "missing `## Host Environment` section (replacement for stable Host/OS fields); got:\n{prompt}"
+        );
+    }
+
+    // STORY-011 Increment 1: the per-turn dynamic block must not carry a
+    // `## Current Date & Time` header. Implicit-caching providers (Qwen,
+    // DeepSeek, Groq, OpenAI, Moonshot) match on the longest byte-identical
+    // prefix across calls; a timestamp inside the system message invalidates
+    // the entire prefix on every request.
+    #[test]
+    fn story_011_dynamic_system_block_omits_current_date_time() {
+        let out = build_dynamic_system_block("qwen/qwen3.6-plus");
+        assert!(
+            !out.contains("## Current Date & Time"),
+            "build_dynamic_system_block must not emit a per-call `## Current Date & Time` header; got:\n{out}"
+        );
+    }
+
+    // STORY-011 Increment 2: the agent/CLI-path SystemPromptParts builder
+    // (called at daemon startup to seed `ctx.stable_system_prefix`) must not
+    // emit `## Current Date & Time` into either half of the parts. This is a
+    // separate emission site from `build_dynamic_system_block` and covers
+    // the `run_tool_call_loop` path via `SystemPromptParts`.
+    #[test]
+    fn story_011_system_prompt_parts_omits_current_date_time() {
+        let ws = make_workspace();
+        let parts = build_system_prompt_parts_with_mode_and_autonomy(
+            ws.path(),
+            "qwen/qwen3.6-plus",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            false,
+            crate::config::SkillsPromptInjectionMode::Full,
+            false,
+            0,
+        );
+        assert!(
+            !parts.stable.contains("## Current Date & Time"),
+            "parts.stable must not contain per-call `## Current Date & Time`; got:\n{}",
+            parts.stable
+        );
+        assert!(
+            !parts.dynamic.contains("## Current Date & Time"),
+            "parts.dynamic must not contain per-call `## Current Date & Time`; got:\n{}",
+            parts.dynamic
+        );
+    }
+
+    // STORY-011 Increment 4: split `## Runtime` and move `## Channel
+    // Capabilities`. AC #8 option (b): Host+OS go to the stable prefix,
+    // Model is dropped from the system message entirely (Phase B injects
+    // it via the user-message preamble). `## Channel Capabilities` is
+    // config-driven (autonomy level is daemon-restart-stable) so it moves
+    // from parts.dynamic to parts.stable.
+    #[test]
+    fn story_011_stable_has_host_os_not_model_and_byte_identical_across_models() {
+        let ws = make_workspace();
+        let parts_qwen = build_system_prompt_parts_with_mode_and_autonomy(
+            ws.path(),
+            "qwen/qwen3.6-plus",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            false,
+            crate::config::SkillsPromptInjectionMode::Full,
+            false,
+            0,
+        );
+        let parts_claude = build_system_prompt_parts_with_mode_and_autonomy(
+            ws.path(),
+            "anthropic/claude-sonnet-4.6",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            false,
+            crate::config::SkillsPromptInjectionMode::Full,
+            false,
+            0,
+        );
+
+        // (a) stable has Host + OS, no Model
+        assert!(
+            parts_qwen.stable.contains("Host:"),
+            "stable must contain Host:; got:\n{}",
+            parts_qwen.stable
+        );
+        assert!(
+            parts_qwen.stable.contains("OS:"),
+            "stable must contain OS:; got:\n{}",
+            parts_qwen.stable
+        );
+        assert!(
+            !parts_qwen.stable.contains("Model:"),
+            "stable must NOT contain Model: — it mutates via /model mid-session; got:\n{}",
+            parts_qwen.stable
+        );
+
+        // (b) stable is byte-identical across different model_name arguments
+        assert_eq!(
+            parts_qwen.stable, parts_claude.stable,
+            "stable prefix must survive /model mid-session; differing bytes would invalidate the cache"
+        );
+
+        // (d) Channel Capabilities in stable, not dynamic
+        assert!(
+            parts_qwen.stable.contains("## Channel Capabilities"),
+            "stable must contain `## Channel Capabilities`; got:\n{}",
+            parts_qwen.stable
+        );
+        assert!(
+            !parts_qwen.dynamic.contains("## Channel Capabilities"),
+            "dynamic must NOT contain `## Channel Capabilities`; got:\n{}",
+            parts_qwen.dynamic
+        );
+
+        // SystemPromptParts dynamic must not carry Runtime or the Host/OS/Model
+        // fields either — they're now in stable (Host+OS) or user preamble (Model).
+        assert!(
+            !parts_qwen.dynamic.contains("## Runtime"),
+            "dynamic must NOT contain `## Runtime`; got:\n{}",
+            parts_qwen.dynamic
+        );
+        assert!(
+            !parts_qwen.dynamic.contains("Model:"),
+            "dynamic must NOT contain `Model:`; got:\n{}",
+            parts_qwen.dynamic
+        );
+    }
+
+    // STORY-011 Increment 4: the channel-runtime path `build_dynamic_system_block`
+    // must no longer emit `## Runtime` or any Host/OS/Model fields. Those live
+    // in the stable prefix (Host/OS) or the user preamble (Model).
+    #[test]
+    fn story_011_dynamic_system_block_omits_runtime_and_host_os_model() {
+        let out = build_dynamic_system_block("qwen/qwen3.6-plus");
+        assert!(
+            !out.contains("## Runtime"),
+            "build_dynamic_system_block must not emit `## Runtime`; got:\n{out}"
+        );
+        assert!(
+            !out.contains("Host:"),
+            "build_dynamic_system_block must not emit `Host:`; got:\n{out}"
+        );
+        assert!(
+            !out.contains("OS:"),
+            "build_dynamic_system_block must not emit `OS:`; got:\n{out}"
+        );
+        assert!(
+            !out.contains("Model:"),
+            "build_dynamic_system_block must not emit `Model:`; got:\n{out}"
+        );
     }
 
     #[test]
@@ -9301,9 +9497,20 @@ BTC is currently around $65,000 based on latest tool output."#
         let ws = make_workspace();
         let prompt = build_system_prompt(ws.path(), "claude-sonnet-4", &[], &[], None, None);
 
-        assert!(prompt.contains("Model: claude-sonnet-4"));
+        // STORY-011: Host + OS live in the stable `## Host Environment`
+        // section. Model is intentionally absent from the system prompt —
+        // it mutates mid-session via `/model` and is now emitted in the
+        // user-message preamble instead (Phase B).
+        assert!(
+            prompt.contains("## Host Environment"),
+            "missing `## Host Environment` section; got:\n{prompt}"
+        );
         assert!(prompt.contains(&format!("OS: {}", std::env::consts::OS)));
         assert!(prompt.contains("Host:"));
+        assert!(
+            !prompt.contains("Model: claude-sonnet-4"),
+            "STORY-011: Model must not appear in the system prompt; got:\n{prompt}"
+        );
     }
 
     #[test]
@@ -9947,18 +10154,228 @@ BTC is currently around $65,000 based on latest tool output."#
             .calls
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // STORY-011 Increment 7: `run_tool_call_loop` injects a
+        // `[{now}]` user-role preamble before each LLM call, so each
+        // captured history has one extra trailing user turn.
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].len(), 2);
+        assert_eq!(calls[0].len(), 3);
         assert_eq!(calls[0][0].0, "system");
         assert_eq!(calls[0][1].0, "user");
-        assert_eq!(calls[1].len(), 4);
+        assert_eq!(calls[0][2].0, "user");
+        assert!(calls[0][2].1.starts_with("[2"));
+        assert_eq!(calls[1].len(), 5);
         assert_eq!(calls[1][0].0, "system");
         assert_eq!(calls[1][1].0, "user");
         assert_eq!(calls[1][2].0, "assistant");
         assert_eq!(calls[1][3].0, "user");
+        assert_eq!(calls[1][4].0, "user");
+        assert!(calls[1][4].1.starts_with("[2"));
         assert!(calls[1][1].1.contains("hello"));
         assert!(calls[1][2].1.contains("response-1"));
         assert!(calls[1][3].1.contains("follow up"));
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_user_turn_carries_model_name() {
+        // STORY-011 Increment 6: the user-message preamble carries the
+        // active model name so the model sees its own identity on every
+        // turn without the name appearing in the stable system prefix.
+        let channel_impl = Arc::new(RecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let provider_impl = Arc::new(HistoryCaptureProvider::default());
+
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: provider_impl.clone(),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(MAX_CONVERSATION_SENDERS).unwrap(),
+            ))),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            prompt_config: Arc::new(crate::config::Config::default()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: crate::config::MultimodalConfig::default(),
+            media_pipeline: crate::config::MediaPipelineConfig::default(),
+            transcription_config: crate::config::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(Vec::new()),
+            query_classification: crate::config::QueryClassificationConfig::default(),
+            ack_reactions: true,
+            show_tool_calls: true,
+            session_store: None,
+            observe_store: None,
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &crate::config::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: crate::config::PacingConfig::default(),
+            max_tool_result_chars: 0,
+            context_token_budget: 0,
+            debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+        });
+
+        process_channel_message(
+            runtime_ctx,
+            traits::ChannelMessage {
+                id: "msg-m".to_string(),
+                sender: "alice".to_string(),
+                reply_target: "chat-1".to_string(),
+                content: "hello".to_string(),
+                channel: "test-channel".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        let calls = provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 1);
+        let user_turn = &calls[0][1].1;
+        assert!(
+            user_turn.contains("model=test-model"),
+            "expected `model=test-model` in user preamble, got: {user_turn:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_user_turn_carries_timestamp_prefix() {
+        let channel_impl = Arc::new(RecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let provider_impl = Arc::new(HistoryCaptureProvider::default());
+
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: provider_impl.clone(),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(MAX_CONVERSATION_SENDERS).unwrap(),
+            ))),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            prompt_config: Arc::new(crate::config::Config::default()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: crate::config::MultimodalConfig::default(),
+            media_pipeline: crate::config::MediaPipelineConfig::default(),
+            transcription_config: crate::config::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(Vec::new()),
+            query_classification: crate::config::QueryClassificationConfig::default(),
+            ack_reactions: true,
+            show_tool_calls: true,
+            session_store: None,
+            observe_store: None,
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &crate::config::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: crate::config::PacingConfig::default(),
+            max_tool_result_chars: 0,
+            context_token_budget: 0,
+            debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+        });
+
+        process_channel_message(
+            runtime_ctx,
+            traits::ChannelMessage {
+                id: "msg-a".to_string(),
+                sender: "alice".to_string(),
+                reply_target: "chat-1".to_string(),
+                content: "hello there".to_string(),
+                channel: "test-channel".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        let calls = provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 1, "expected exactly one LLM call");
+        // calls[0][1] is the first user turn; must begin with a timestamp
+        // prefix of the form `[YYYY-MM-DD HH:MM:SS ...]`.
+        let user_turn = &calls[0][1].1;
+        assert!(
+            user_turn.starts_with("[2"),
+            "expected channel user turn to start with `[2<year>`, got: {user_turn:?}"
+        );
+        assert!(
+            user_turn.contains("hello there"),
+            "expected original user content preserved, got: {user_turn:?}"
+        );
     }
 
     #[tokio::test]
@@ -10260,13 +10677,24 @@ BTC is currently around $65,000 based on latest tool output."#
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].len(), 2);
+        // STORY-011 Increment 7: +1 trailing user-role `[{now}]` preamble
+        // injected before every LLM call inside the tool loop.
+        assert_eq!(calls[0].len(), 3);
         // Memory context is injected into the system prompt, not the user message.
         assert_eq!(calls[0][0].0, "system");
         assert!(calls[0][0].1.contains("[Memory context]"));
         assert!(calls[0][0].1.contains("Age is 45"));
         assert_eq!(calls[0][1].0, "user");
-        assert_eq!(calls[0][1].1, "hello");
+        // User turn carries `[{now}]` timestamp prefix but NOT memory context.
+        let user_turn = &calls[0][1].1;
+        assert!(
+            user_turn.starts_with("[2"),
+            "expected timestamp prefix, got: {user_turn:?}"
+        );
+        assert!(user_turn.contains("hello"));
+        assert!(!user_turn.contains("[Memory context]"));
+        assert_eq!(calls[0][2].0, "user");
+        assert!(calls[0][2].1.starts_with("[2"));
 
         let histories = runtime_ctx
             .conversation_histories
@@ -10276,7 +10704,8 @@ BTC is currently around $65,000 based on latest tool output."#
             .peek("test-channel_chat-ctx_alice")
             .expect("history should be stored for sender");
         assert_eq!(turns[0].role, "user");
-        assert_eq!(turns[0].content, "hello");
+        assert!(turns[0].content.starts_with("[2"));
+        assert!(turns[0].content.contains("hello"));
         assert!(!turns[0].content.contains("[Memory context]"));
     }
 
@@ -10378,13 +10807,16 @@ BTC is currently around $65,000 based on latest tool output."#
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].len(), 4);
+        // STORY-011 Increment 7: +1 trailing user-role `[{now}]` preamble
+        // injected by `run_tool_call_loop` before each LLM call.
+        assert_eq!(calls[0].len(), 5);
 
         let roles = calls[0]
             .iter()
             .map(|(role, _)| role.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(roles, vec!["system", "user", "assistant", "user"]);
+        assert_eq!(roles, vec!["system", "user", "assistant", "user", "user"]);
+        assert!(calls[0][4].1.starts_with("[2"));
         assert!(
             calls[0][0].1.contains("When responding on Telegram:"),
             "telegram channel instructions should be embedded into the system prompt"
@@ -11100,7 +11532,8 @@ This is an example JSON object for profile settings."#;
             .expect("history should exist for sender");
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
-        assert_eq!(turns[0].content, "What is WAL?");
+        assert!(turns[0].content.starts_with("[2"));
+        assert!(turns[0].content.contains("What is WAL?"));
         assert_eq!(turns[1].role, "assistant");
         assert_eq!(turns[1].content, "ok");
         assert!(
@@ -11232,13 +11665,14 @@ This is an example JSON object for profile settings."#;
             .expect("history should exist for sender");
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
-        assert_eq!(turns[0].content, "What is WAL?");
+        assert!(turns[0].content.starts_with("[2"));
+        assert!(turns[0].content.contains("What is WAL?"));
         assert_eq!(turns[1].role, "assistant");
         assert_eq!(turns[1].content, "ok");
         assert!(
             turns
                 .iter()
-                .all(|turn| turn.content != "trigger format error"),
+                .all(|turn| !turn.content.contains("trigger format error")),
             "failed non-retryable turn must not persist in history"
         );
     }

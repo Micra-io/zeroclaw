@@ -2517,6 +2517,17 @@ pub(crate) async fn run_tool_call_loop(
                 (provider, provider_name, model)
             };
 
+        // STORY-011 Increment 7: inject a fresh `[{now}]` user-role
+        // preamble before every LLM-call boundary inside the tool loop
+        // so the model retains an up-to-date time signal across long
+        // multi-iteration turns. This covers both native-tool and
+        // prompt-mode branches uniformly and is benign for providers
+        // (pure text message).
+        {
+            let now = super::user_message::format_now();
+            history.push(ChatMessage::user(format!("[{now}]")));
+        }
+
         let prepared_messages =
             multimodal::prepare_messages_for_provider(history, multimodal_config).await?;
 
@@ -4069,12 +4080,9 @@ pub async fn run(
             .map(|r| build_hardware_context(r, &effective_msg, &board_names, rag_limit))
             .unwrap_or_default();
         let context = format!("{mem_context}{hw_context}");
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-        let enriched = if context.is_empty() {
-            format!("[{now}] {effective_msg}")
-        } else {
-            format!("{context}[{now}] {effective_msg}")
-        };
+        let now = super::user_message::format_now();
+        let enriched =
+            super::user_message::enrich_user_message(&now, &model_name, &effective_msg, &context);
 
         let mut history = vec![
             build_system_message(
@@ -5462,9 +5470,12 @@ mod tests {
         }
     }
 
+    type CapturedHistories = Arc<Mutex<Vec<Vec<(String, String)>>>>;
+
     struct ScriptedProvider {
         responses: Arc<Mutex<VecDeque<ChatResponse>>>,
         capabilities: ProviderCapabilities,
+        captured_histories: CapturedHistories,
     }
 
     impl ScriptedProvider {
@@ -5481,7 +5492,12 @@ mod tests {
             Self {
                 responses: Arc::new(Mutex::new(scripted)),
                 capabilities: ProviderCapabilities::default(),
+                captured_histories: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        fn captured_histories(&self) -> CapturedHistories {
+            Arc::clone(&self.captured_histories)
         }
 
         fn with_native_tool_support(mut self) -> Self {
@@ -5508,10 +5524,21 @@ mod tests {
 
         async fn chat(
             &self,
-            _request: ChatRequest<'_>,
+            request: ChatRequest<'_>,
             _model: &str,
             _temperature: f64,
         ) -> anyhow::Result<ChatResponse> {
+            {
+                let snapshot: Vec<(String, String)> = request
+                    .messages
+                    .iter()
+                    .map(|m| (m.role.clone(), m.content.clone()))
+                    .collect();
+                self.captured_histories
+                    .lock()
+                    .expect("captured_histories lock should be valid")
+                    .push(snapshot);
+            }
             let mut responses = self
                 .responses
                 .lock()
@@ -6737,6 +6764,96 @@ mod tests {
         assert_eq!(recorded[0]["delivery"], serde_json::json!({"mode": "none"}));
     }
 
+    // STORY-011 Increment 7: Within a multi-iteration tool loop, the model
+    // must see a fresh `[{now}]` preamble on every LLM call so the time
+    // signal never goes stale when a single user turn spans 5+ tool
+    // iterations. The preamble is injected uniformly across the native-tool
+    // and prompt-mode branches before each `provider.chat(...)` call.
+    #[tokio::test]
+    async fn run_tool_call_loop_injects_time_preamble_every_iteration() {
+        // 5 tool_call iterations + 1 final text → 6 total LLM calls.
+        // Vary tool args each turn so the loop-detector circuit breaker
+        // (identical-args repetition) doesn't trip.
+        let provider = ScriptedProvider::from_text_responses(vec![
+            r#"<tool_call>
+{"name":"count_tool","arguments":{"value":"A"}}
+</tool_call>"#,
+            r#"<tool_call>
+{"name":"count_tool","arguments":{"value":"B"}}
+</tool_call>"#,
+            r#"<tool_call>
+{"name":"count_tool","arguments":{"value":"C"}}
+</tool_call>"#,
+            r#"<tool_call>
+{"name":"count_tool","arguments":{"value":"D"}}
+</tool_call>"#,
+            r#"<tool_call>
+{"name":"count_tool","arguments":{"value":"E"}}
+</tool_call>"#,
+            "done",
+        ]);
+        let captured = provider.captured_histories();
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(CountingTool::new(
+            "count_tool",
+            Arc::clone(&invocations),
+        ))];
+
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("run tool calls"),
+        ];
+        let observer = NoopObserver;
+
+        let result = run_tool_call_loop(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            None,
+            "cli",
+            None,
+            &crate::config::MultimodalConfig::default(),
+            10,
+            None,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            None,
+            &crate::config::PacingConfig::default(),
+            0,
+            0,
+            None,
+        )
+        .await
+        .expect("tool loop should finish on final text response");
+        assert_eq!(result, "done");
+
+        let captures = captured.lock().expect("captured lock valid");
+        assert_eq!(
+            captures.len(),
+            6,
+            "expected 6 LLM calls (5 tool iterations + 1 final); got {}",
+            captures.len()
+        );
+        for (idx, snapshot) in captures.iter().enumerate() {
+            let has_timestamp_preamble = snapshot
+                .iter()
+                .any(|(role, content)| role == "user" && content.starts_with("[2"));
+            assert!(
+                has_timestamp_preamble,
+                "iteration {idx}: history must contain a user-role [timestamp] preamble; got: {snapshot:#?}",
+            );
+        }
+    }
+
     #[tokio::test]
     async fn run_tool_call_loop_deduplicates_repeated_tool_calls() {
         let provider = ScriptedProvider::from_text_responses(vec![
@@ -7113,6 +7230,7 @@ mod tests {
                 native_tool_calling: true,
                 ..ProviderCapabilities::default()
             },
+            captured_histories: Arc::new(Mutex::new(Vec::new())),
         };
 
         let invocations = Arc::new(AtomicUsize::new(0));
@@ -9675,6 +9793,7 @@ Let me check the result."#;
                 reasoning_content: None,
             }]))),
             capabilities: ProviderCapabilities::default(),
+            captured_histories: Arc::new(Mutex::new(Vec::new())),
         };
         let observer = NoopObserver;
         let workspace = tempfile::TempDir::new().unwrap();
@@ -9836,6 +9955,7 @@ Let me check the result."#;
                 reasoning_content: None,
             }]))),
             capabilities: ProviderCapabilities::default(),
+            captured_histories: Arc::new(Mutex::new(Vec::new())),
         };
         let observer = NoopObserver;
         let mut history = vec![ChatMessage::system("test"), ChatMessage::user("hello")];
