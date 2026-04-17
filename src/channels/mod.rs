@@ -680,22 +680,23 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
     }
 }
 
-/// Build the per-turn dynamic system block: currently just `## Runtime`.
+/// Build the per-turn dynamic system block.
 ///
-/// STORY-011 Increment 1 removed the `## Current Date & Time` header from
-/// this block. Implicit-caching providers (Qwen, DeepSeek, Groq, OpenAI,
-/// Moonshot) cache the longest byte-identical prefix across requests, so
-/// the timestamp cannot live anywhere inside the system message without
-/// invalidating the cache on every call. The `[{now}]` prefix on the
-/// user-facing message is now the canonical current-time signal; see
-/// Phase B of STORY-011 for the user-message wiring.
-fn build_dynamic_system_block(model: &str) -> String {
-    let host =
-        hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
-    format!(
-        "## Runtime\n\nHost: {host} | OS: {} | Model: {model}\n",
-        std::env::consts::OS,
-    )
+/// STORY-011 Increments 1 & 4: this block carries no per-call content
+/// anymore. `## Current Date & Time` moved to the user-message preamble
+/// (Phase B); `## Runtime` split — Host+OS to the stable prefix,
+/// `Model:` to the user preamble. Implicit-caching providers need a
+/// byte-identical prefix across requests, so any timestamp or mutable
+/// runtime value inside the system message invalidates the cache on
+/// every call.
+///
+/// The function returns an empty string today. It's kept (rather than
+/// inlined) so that Phase B and future stories have a well-known hook
+/// for injecting new per-turn content if needed, without having to
+/// restructure the `build_channel_system_prompt` / `process_channel_message`
+/// call sites that feed it into `ChatMessage::system_with_stable_prefix`.
+fn build_dynamic_system_block(_model: &str) -> String {
+    String::new()
 }
 
 /// Append channel-specific instructions and a per-conversation
@@ -4245,9 +4246,12 @@ pub fn build_system_prompt_parts_with_mode_and_autonomy(
     }
 
     // ── Truncation (max_system_prompt_chars budget) ────────────
-    // Applied to the stable block only. The dynamic suffix is tiny (<1KB)
-    // and must not be truncated because it carries Date & Time / Runtime
-    // context the model relies on for "today" questions.
+    // Applied to the stable block's bootstrap content. STORY-011 post-fix:
+    // the dynamic suffix is now empty (all per-call content moved to the
+    // user-message preamble), and the sections appended below — Channel
+    // Capabilities (config-driven, daemon-stable) and Host Environment
+    // (env-constant) — are also stable and added AFTER this truncation so
+    // they survive even when the bootstrap is clipped.
     if max_system_prompt_chars > 0 && stable.len() > max_system_prompt_chars {
         // Truncate on a char boundary, keeping the top portion (identity + safety).
         let mut end = max_system_prompt_chars;
@@ -4259,19 +4263,17 @@ pub fn build_system_prompt_parts_with_mode_and_autonomy(
         stable.push_str("\n\n[System prompt truncated to fit context budget]\n");
     }
 
-    // ── Dynamic suffix ─────────────────────────────────────────
-    // Channel Capabilities, Date & Time, and Runtime change (or could
-    // change) per call and must live *after* the cache breakpoint so the
-    // stable prefix hash survives across invocations.
-    let mut dynamic = String::with_capacity(1024);
-
-    // ── 8. Channel Capabilities (skipped in compact_context mode) ──
+    // ── 8. Channel Capabilities (STORY-011 AC #8: moved from dynamic → stable)
+    // Content branches on `autonomy_config.level` and `compact_context`, both
+    // of which are daemon-restart-stable. Placing this block in the stable
+    // prefix (and after truncation) keeps it in every request while letting
+    // implicit-caching providers see a byte-identical prefix across calls.
     if !compact_context {
-        dynamic.push_str("## Channel Capabilities\n\n");
-        dynamic.push_str("- You are running as a messaging bot. Your response is automatically sent back to the user's channel.\n");
-        dynamic
+        stable.push_str("## Channel Capabilities\n\n");
+        stable.push_str("- You are running as a messaging bot. Your response is automatically sent back to the user's channel.\n");
+        stable
             .push_str("- You do NOT need to ask permission to respond — just respond directly.\n");
-        dynamic.push_str(match autonomy_config.map(|cfg| cfg.level) {
+        stable.push_str(match autonomy_config.map(|cfg| cfg.level) {
         Some(crate::security::AutonomyLevel::Full) => {
             "- If the runtime policy already allows a tool, use it directly; do not ask the user for extra approval.\n\
              - Never pretend you are waiting for a human approval click or confirmation when the runtime policy already permits the action.\n\
@@ -4285,26 +4287,31 @@ pub fn build_system_prompt_parts_with_mode_and_autonomy(
              - If there is no approval path for this channel or the runtime blocks an action, explain that restriction directly instead of simulating an approval flow.\n"
         }
     });
-        dynamic.push_str("- NEVER repeat, describe, or echo credentials, tokens, API keys, or secrets in your responses.\n");
-        dynamic.push_str("- If a tool output contains credentials, they have already been redacted — do not mention them.\n");
-        dynamic.push_str("- When a user sends a voice note, it is automatically transcribed to text. Your text reply is automatically converted to a voice note and sent back. Do NOT attempt to generate audio yourself — TTS is handled by the channel.\n");
-        dynamic.push_str("- NEVER narrate or describe your tool usage. Do NOT say 'Let me fetch...', 'I will use...', 'Searching...', or similar. Give the FINAL ANSWER only — no intermediate steps, no tool mentions, no progress updates.\n\n");
+        stable.push_str("- NEVER repeat, describe, or echo credentials, tokens, API keys, or secrets in your responses.\n");
+        stable.push_str("- If a tool output contains credentials, they have already been redacted — do not mention them.\n");
+        stable.push_str("- When a user sends a voice note, it is automatically transcribed to text. Your text reply is automatically converted to a voice note and sent back. Do NOT attempt to generate audio yourself — TTS is handled by the channel.\n");
+        stable.push_str("- NEVER narrate or describe your tool usage. Do NOT say 'Let me fetch...', 'I will use...', 'Searching...', or similar. Give the FINAL ANSWER only — no intermediate steps, no tool mentions, no progress updates.\n\n");
     }
 
-    // ── 6. Runtime ──────────────────────────────────────────────
-    // STORY-011 Increment 2: the `## Current Date & Time` header was removed
-    // from this dynamic block. Implicit-caching providers invalidate the
-    // entire prefix on any per-call tail content, and the user-message
-    // `[{now}]` prefix is now the canonical current-time signal. Runtime is
-    // kept here for Increment 4 to split further (Host/OS → stable; Model →
-    // user preamble in Phase B).
+    // ── 9. Host Environment (STORY-011 AC #8: split from Runtime) ──
+    // Host + OS are env-constant (daemon-restart-stable). Model is mutable
+    // mid-session via `/model` and therefore NOT included here — Phase B
+    // injects it via the user-message preamble so cache bytes don't shift
+    // when the active model changes.
     let host =
         hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
     let _ = writeln!(
-        dynamic,
-        "## Runtime\n\nHost: {host} | OS: {} | Model: {model_name}\n",
+        stable,
+        "## Host Environment\n\nHost: {host} | OS: {}\n",
         std::env::consts::OS,
     );
+
+    // ── Dynamic suffix ─────────────────────────────────────────
+    // STORY-011: empty by design. Per-call content (timestamp, model name)
+    // lives in the user-message preamble so the stable prefix stays
+    // byte-identical across turns for implicit-caching providers.
+    let _ = model_name; // unused now that Model: moves to user preamble
+    let dynamic = String::new();
 
     if stable.is_empty() && dynamic.is_empty() {
         return SystemPromptParts {
@@ -9211,6 +9218,115 @@ BTC is currently around $65,000 based on latest tool output."#
             !parts.dynamic.contains("## Current Date & Time"),
             "parts.dynamic must not contain per-call `## Current Date & Time`; got:\n{}",
             parts.dynamic
+        );
+    }
+
+    // STORY-011 Increment 4: split `## Runtime` and move `## Channel
+    // Capabilities`. AC #8 option (b): Host+OS go to the stable prefix,
+    // Model is dropped from the system message entirely (Phase B injects
+    // it via the user-message preamble). `## Channel Capabilities` is
+    // config-driven (autonomy level is daemon-restart-stable) so it moves
+    // from parts.dynamic to parts.stable.
+    #[test]
+    fn story_011_stable_has_host_os_not_model_and_byte_identical_across_models() {
+        let ws = make_workspace();
+        let parts_qwen = build_system_prompt_parts_with_mode_and_autonomy(
+            ws.path(),
+            "qwen/qwen3.6-plus",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            false,
+            crate::config::SkillsPromptInjectionMode::Full,
+            false,
+            0,
+        );
+        let parts_claude = build_system_prompt_parts_with_mode_and_autonomy(
+            ws.path(),
+            "anthropic/claude-sonnet-4.6",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            false,
+            crate::config::SkillsPromptInjectionMode::Full,
+            false,
+            0,
+        );
+
+        // (a) stable has Host + OS, no Model
+        assert!(
+            parts_qwen.stable.contains("Host:"),
+            "stable must contain Host:; got:\n{}",
+            parts_qwen.stable
+        );
+        assert!(
+            parts_qwen.stable.contains("OS:"),
+            "stable must contain OS:; got:\n{}",
+            parts_qwen.stable
+        );
+        assert!(
+            !parts_qwen.stable.contains("Model:"),
+            "stable must NOT contain Model: — it mutates via /model mid-session; got:\n{}",
+            parts_qwen.stable
+        );
+
+        // (b) stable is byte-identical across different model_name arguments
+        assert_eq!(
+            parts_qwen.stable, parts_claude.stable,
+            "stable prefix must survive /model mid-session; differing bytes would invalidate the cache"
+        );
+
+        // (d) Channel Capabilities in stable, not dynamic
+        assert!(
+            parts_qwen.stable.contains("## Channel Capabilities"),
+            "stable must contain `## Channel Capabilities`; got:\n{}",
+            parts_qwen.stable
+        );
+        assert!(
+            !parts_qwen.dynamic.contains("## Channel Capabilities"),
+            "dynamic must NOT contain `## Channel Capabilities`; got:\n{}",
+            parts_qwen.dynamic
+        );
+
+        // SystemPromptParts dynamic must not carry Runtime or the Host/OS/Model
+        // fields either — they're now in stable (Host+OS) or user preamble (Model).
+        assert!(
+            !parts_qwen.dynamic.contains("## Runtime"),
+            "dynamic must NOT contain `## Runtime`; got:\n{}",
+            parts_qwen.dynamic
+        );
+        assert!(
+            !parts_qwen.dynamic.contains("Model:"),
+            "dynamic must NOT contain `Model:`; got:\n{}",
+            parts_qwen.dynamic
+        );
+    }
+
+    // STORY-011 Increment 4: the channel-runtime path `build_dynamic_system_block`
+    // must no longer emit `## Runtime` or any Host/OS/Model fields. Those live
+    // in the stable prefix (Host/OS) or the user preamble (Model).
+    #[test]
+    fn story_011_dynamic_system_block_omits_runtime_and_host_os_model() {
+        let out = build_dynamic_system_block("qwen/qwen3.6-plus");
+        assert!(
+            !out.contains("## Runtime"),
+            "build_dynamic_system_block must not emit `## Runtime`; got:\n{out}"
+        );
+        assert!(
+            !out.contains("Host:"),
+            "build_dynamic_system_block must not emit `Host:`; got:\n{out}"
+        );
+        assert!(
+            !out.contains("OS:"),
+            "build_dynamic_system_block must not emit `OS:`; got:\n{out}"
+        );
+        assert!(
+            !out.contains("Model:"),
+            "build_dynamic_system_block must not emit `Model:`; got:\n{out}"
         );
     }
 
