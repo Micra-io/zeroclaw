@@ -10154,15 +10154,22 @@ BTC is currently around $65,000 based on latest tool output."#
             .calls
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // STORY-011 Increment 7: `run_tool_call_loop` injects a
+        // `[{now}]` user-role preamble before each LLM call, so each
+        // captured history has one extra trailing user turn.
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].len(), 2);
+        assert_eq!(calls[0].len(), 3);
         assert_eq!(calls[0][0].0, "system");
         assert_eq!(calls[0][1].0, "user");
-        assert_eq!(calls[1].len(), 4);
+        assert_eq!(calls[0][2].0, "user");
+        assert!(calls[0][2].1.starts_with("[2"));
+        assert_eq!(calls[1].len(), 5);
         assert_eq!(calls[1][0].0, "system");
         assert_eq!(calls[1][1].0, "user");
         assert_eq!(calls[1][2].0, "assistant");
         assert_eq!(calls[1][3].0, "user");
+        assert_eq!(calls[1][4].0, "user");
+        assert!(calls[1][4].1.starts_with("[2"));
         assert!(calls[1][1].1.contains("hello"));
         assert!(calls[1][2].1.contains("response-1"));
         assert!(calls[1][3].1.contains("follow up"));
@@ -10670,7 +10677,9 @@ BTC is currently around $65,000 based on latest tool output."#
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].len(), 2);
+        // STORY-011 Increment 7: +1 trailing user-role `[{now}]` preamble
+        // injected before every LLM call inside the tool loop.
+        assert_eq!(calls[0].len(), 3);
         // Memory context is injected into the system prompt, not the user message.
         assert_eq!(calls[0][0].0, "system");
         assert!(calls[0][0].1.contains("[Memory context]"));
@@ -10684,6 +10693,8 @@ BTC is currently around $65,000 based on latest tool output."#
         );
         assert!(user_turn.contains("hello"));
         assert!(!user_turn.contains("[Memory context]"));
+        assert_eq!(calls[0][2].0, "user");
+        assert!(calls[0][2].1.starts_with("[2"));
 
         let histories = runtime_ctx
             .conversation_histories
@@ -10796,13 +10807,16 @@ BTC is currently around $65,000 based on latest tool output."#
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].len(), 4);
+        // STORY-011 Increment 7: +1 trailing user-role `[{now}]` preamble
+        // injected by `run_tool_call_loop` before each LLM call.
+        assert_eq!(calls[0].len(), 5);
 
         let roles = calls[0]
             .iter()
             .map(|(role, _)| role.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(roles, vec!["system", "user", "assistant", "user"]);
+        assert_eq!(roles, vec!["system", "user", "assistant", "user", "user"]);
+        assert!(calls[0][4].1.starts_with("[2"));
         assert!(
             calls[0][0].1.contains("When responding on Telegram:"),
             "telegram channel instructions should be embedded into the system prompt"
