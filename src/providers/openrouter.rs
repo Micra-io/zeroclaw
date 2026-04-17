@@ -1537,6 +1537,55 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // STORY-011 Phase C regression guards
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn story_011_system_message_has_no_timestamp_no_model_and_one_cache_control() {
+        // STORY-011 invariant: the serialized OpenRouter system message must
+        // carry neither the old `## Current Date & Time` section nor the
+        // `Model:` label (both now live in the user-message preamble) AND
+        // must expose exactly ONE `ephemeral` cache_control breakpoint on
+        // the stable block. Implicit-caching providers (Qwen, DeepSeek,
+        // Groq, OpenAI, Moonshot) ignore cache_control and key on the
+        // longest byte-identical prefix; a timestamp or per-model label in
+        // the system message would drop cache hits to 0% on every turn.
+        let stable = "## Identity\n\nYou are ZeroClaw.\n\n\
+                      ## Tools\n\n- shell: Run commands\n\n\
+                      ## Safety\n\n- NEVER repeat credentials.\n\n\
+                      ## Channel Capabilities\n\nrunning as a messaging bot\n\n\
+                      ## Host Environment\n\nHost: testhost | OS: macos\n";
+        let dynamic = "";
+
+        let msg = ChatMessage::system_with_stable_prefix(stable, dynamic);
+        let api = OpenRouterProvider::to_history_message(&msg);
+        let json = serde_json::to_value(&api.content).unwrap();
+        let json_str = serde_json::to_string(&json).unwrap();
+
+        assert!(
+            !json_str.contains("## Current Date & Time"),
+            "STORY-011: serialized system message must not contain `## Current Date & Time`; got: {json_str}"
+        );
+        assert!(
+            !json_str.contains("Model:"),
+            "STORY-011: serialized system message must not contain `Model:` label (moved to user preamble); got: {json_str}"
+        );
+
+        let parts = json.as_array().expect("system content must be Parts");
+        let ephemeral_count = parts
+            .iter()
+            .filter(|p| {
+                p.get("cache_control").and_then(|c| c.get("type"))
+                    == Some(&serde_json::json!("ephemeral"))
+            })
+            .count();
+        assert_eq!(
+            ephemeral_count, 1,
+            "STORY-011: exactly one MessagePart must carry cache_control.type=ephemeral; got parts: {parts:?}"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // prompt caching: response-side token mapping (Unit 3)
     // ═══════════════════════════════════════════════════════════════════════
 
