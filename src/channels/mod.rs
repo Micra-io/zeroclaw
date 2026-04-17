@@ -2777,16 +2777,21 @@ async fn process_channel_message(
             .is_some_and(|turns| !turns.is_empty())
     };
 
-    // Enrich the current user-turn content with a `[{now}]` timestamp
-    // prefix so the per-call timestamp lives in the user message rather
-    // than the system block. Keeping timestamps out of the system block
-    // preserves a byte-identical stable prefix across turns on
-    // implicit-caching providers (Qwen/DeepSeek/Groq/OpenAI/Moonshot).
-    // Memory recall below still queries on raw `msg.content` so the
-    // retrieval vector isn't polluted by the timestamp prefix.
+    // Enrich the current user-turn content with a `[{now} | model={m}]`
+    // preamble so both the per-turn timestamp and the active model name
+    // live in the user message rather than the system block. Keeping
+    // these out of the system block preserves a byte-identical stable
+    // prefix across turns on implicit-caching providers
+    // (Qwen/DeepSeek/Groq/OpenAI/Moonshot). Memory recall below still
+    // queries on raw `msg.content` so the retrieval vector isn't polluted
+    // by the preamble.
     let now_for_user_turn = crate::agent::user_message::format_now();
-    let enriched_user_content =
-        crate::agent::user_message::enrich_user_message(&now_for_user_turn, &msg.content, "");
+    let enriched_user_content = crate::agent::user_message::enrich_user_message(
+        &now_for_user_turn,
+        route.model.as_str(),
+        &msg.content,
+        "",
+    );
 
     // Preserve user turn before the LLM call so interrupted requests keep context.
     append_sender_turn(
@@ -10161,6 +10166,106 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(calls[1][1].1.contains("hello"));
         assert!(calls[1][2].1.contains("response-1"));
         assert!(calls[1][3].1.contains("follow up"));
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_user_turn_carries_model_name() {
+        // STORY-011 Increment 6: the user-message preamble carries the
+        // active model name so the model sees its own identity on every
+        // turn without the name appearing in the stable system prefix.
+        let channel_impl = Arc::new(RecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let provider_impl = Arc::new(HistoryCaptureProvider::default());
+
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: provider_impl.clone(),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            stable_system_prefix: Arc::new(String::new()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(MAX_CONVERSATION_SENDERS).unwrap(),
+            ))),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            prompt_config: Arc::new(crate::config::Config::default()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: crate::config::MultimodalConfig::default(),
+            media_pipeline: crate::config::MediaPipelineConfig::default(),
+            transcription_config: crate::config::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(Vec::new()),
+            query_classification: crate::config::QueryClassificationConfig::default(),
+            ack_reactions: true,
+            show_tool_calls: true,
+            session_store: None,
+            observe_store: None,
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &crate::config::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: crate::config::PacingConfig::default(),
+            max_tool_result_chars: 0,
+            context_token_budget: 0,
+            debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+        });
+
+        process_channel_message(
+            runtime_ctx,
+            traits::ChannelMessage {
+                id: "msg-m".to_string(),
+                sender: "alice".to_string(),
+                reply_target: "chat-1".to_string(),
+                content: "hello".to_string(),
+                channel: "test-channel".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        let calls = provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 1);
+        let user_turn = &calls[0][1].1;
+        assert!(
+            user_turn.contains("model=test-model"),
+            "expected `model=test-model` in user preamble, got: {user_turn:?}"
+        );
     }
 
     #[tokio::test]

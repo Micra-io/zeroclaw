@@ -4070,7 +4070,8 @@ pub async fn run(
             .unwrap_or_default();
         let context = format!("{mem_context}{hw_context}");
         let now = super::user_message::format_now();
-        let enriched = super::user_message::enrich_user_message(&now, &effective_msg, &context);
+        let enriched =
+            super::user_message::enrich_user_message(&now, &model_name, &effective_msg, &context);
 
         let mut history = vec![
             build_system_message(

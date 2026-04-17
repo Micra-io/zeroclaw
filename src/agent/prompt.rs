@@ -247,13 +247,16 @@ impl PromptSection for RuntimeSection {
         "runtime"
     }
 
-    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+    fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
+        // STORY-011 Increment 6: Host + OS are daemon-restart-stable and
+        // live in the stable prefix. Model was dropped because it mutates
+        // mid-session via `/model` — it now ships in the user-message
+        // preamble (see `agent::user_message::enrich_user_message`).
         let host =
             hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
         Ok(format!(
-            "## Runtime\n\nHost: {host} | OS: {} | Model: {}",
+            "## Host Environment\n\nHost: {host} | OS: {}",
             std::env::consts::OS,
-            ctx.model_name
         ))
     }
 }
@@ -402,6 +405,36 @@ mod tests {
         assert!(
             !prompt.contains("## Current Date & Time"),
             "SystemPromptBuilder::with_defaults() must not emit a date/time section; got:\n{prompt}"
+        );
+    }
+
+    // STORY-011 Increment 6: the Agent-path SystemPromptBuilder must not emit
+    // the `Model:` name (it mutates mid-session via `/model`). The model name
+    // ships in the user-message preamble instead so the stable prefix stays
+    // byte-identical across `/model` switches.
+    #[test]
+    fn story_011_default_prompt_builder_omits_model_name() {
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(TestTool)];
+        let ctx = PromptContext {
+            workspace_dir: Path::new("/tmp"),
+            model_name: "qwen/qwen3.6-plus",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            tool_descriptions: None,
+            security_summary: None,
+            autonomy_level: AutonomyLevel::Supervised,
+        };
+        let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        assert!(
+            !prompt.contains("Model:"),
+            "SystemPromptBuilder::with_defaults() must not emit `Model:`; got:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("qwen/qwen3.6-plus"),
+            "SystemPromptBuilder::with_defaults() must not emit the model name; got:\n{prompt}"
         );
     }
 

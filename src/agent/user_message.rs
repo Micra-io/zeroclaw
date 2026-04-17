@@ -7,20 +7,22 @@ pub fn format_now() -> String {
 
 /// Build the enriched user-message content sent to the LLM.
 ///
-/// The per-turn timestamp prefix (`[{now}]`) lives here — outside the
-/// system message — so that implicit-caching providers (Qwen, DeepSeek,
-/// Groq, OpenAI, Moonshot) keep a byte-identical system prefix across
-/// turns and actually reuse the prompt cache.
+/// The per-turn timestamp prefix and the active model name live here —
+/// outside the system message — so that implicit-caching providers
+/// (Qwen, DeepSeek, Groq, OpenAI, Moonshot) keep a byte-identical system
+/// prefix across turns and actually reuse the prompt cache.
+///
+/// Format: `[{now} | model={model}] {mem_context?}{raw}`.
 ///
 /// `mem_context` is any pre-computed memory/RAG context that the caller
 /// wants to prepend (used by the CLI/REST `agent::run` path). The
 /// channel daemon path leaves it empty because memory context lives in
 /// the system dynamic block there.
-pub fn enrich_user_message(now: &str, raw: &str, mem_context: &str) -> String {
+pub fn enrich_user_message(now: &str, model: &str, raw: &str, mem_context: &str) -> String {
     if mem_context.is_empty() {
-        format!("[{now}] {raw}")
+        format!("[{now} | model={model}] {raw}")
     } else {
-        format!("{mem_context}[{now}] {raw}")
+        format!("{mem_context}[{now} | model={model}] {raw}")
     }
 }
 
@@ -30,14 +32,22 @@ mod tests {
 
     #[test]
     fn enrich_without_context() {
-        let out = enrich_user_message("2026-04-17 10:00:00 CEST", "hello", "");
-        assert_eq!(out, "[2026-04-17 10:00:00 CEST] hello");
+        let out = enrich_user_message("2026-04-17 10:00:00 CEST", "m1", "hello", "");
+        assert_eq!(out, "[2026-04-17 10:00:00 CEST | model=m1] hello");
     }
 
     #[test]
     fn enrich_with_context() {
-        let out = enrich_user_message("2026-04-17 10:00:00 CEST", "hello", "## Memory\nfoo\n\n");
-        assert_eq!(out, "## Memory\nfoo\n\n[2026-04-17 10:00:00 CEST] hello");
+        let out = enrich_user_message(
+            "2026-04-17 10:00:00 CEST",
+            "m1",
+            "hello",
+            "## Memory\nfoo\n\n",
+        );
+        assert_eq!(
+            out,
+            "## Memory\nfoo\n\n[2026-04-17 10:00:00 CEST | model=m1] hello"
+        );
     }
 
     #[test]
