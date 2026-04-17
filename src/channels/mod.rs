@@ -9473,9 +9473,20 @@ BTC is currently around $65,000 based on latest tool output."#
         let ws = make_workspace();
         let prompt = build_system_prompt(ws.path(), "claude-sonnet-4", &[], &[], None, None);
 
-        assert!(prompt.contains("Model: claude-sonnet-4"));
+        // STORY-011: Host + OS live in the stable `## Host Environment`
+        // section. Model is intentionally absent from the system prompt —
+        // it mutates mid-session via `/model` and is now emitted in the
+        // user-message preamble instead (Phase B).
+        assert!(
+            prompt.contains("## Host Environment"),
+            "missing `## Host Environment` section; got:\n{prompt}"
+        );
         assert!(prompt.contains(&format!("OS: {}", std::env::consts::OS)));
         assert!(prompt.contains("Host:"));
+        assert!(
+            !prompt.contains("Model: claude-sonnet-4"),
+            "STORY-011: Model must not appear in the system prompt; got:\n{prompt}"
+        );
     }
 
     #[test]

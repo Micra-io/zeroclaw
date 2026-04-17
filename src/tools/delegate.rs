@@ -2050,9 +2050,15 @@ mod tests {
             prompt.contains(&workspace.display().to_string()),
             "should contain workspace path"
         );
+        // STORY-011: the delegate-agent prompt no longer emits a
+        // `## CRITICAL CONTEXT: CURRENT DATE & TIME` section. Per-call
+        // date/time must not live inside the system message or
+        // implicit-caching providers (Qwen, DeepSeek, Groq, OpenAI,
+        // Moonshot) invalidate the prefix on every request. Delegate
+        // agents inherit the parent's entry-path user-message timestamp.
         assert!(
-            prompt.contains("## CRITICAL CONTEXT: CURRENT DATE & TIME"),
-            "should contain datetime section"
+            !prompt.contains("## CRITICAL CONTEXT: CURRENT DATE & TIME"),
+            "STORY-011: delegate prompt must not emit DateTimeSection; got:\n{prompt}"
         );
         assert!(
             prompt.contains("You are a code reviewer."),
