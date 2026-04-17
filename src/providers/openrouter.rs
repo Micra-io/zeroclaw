@@ -1585,6 +1585,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn story_011_single_ephemeral_breakpoint_covers_stable_block() {
+        // Regression guard — verifies the cache breakpoint covers the stable
+        // content, not the dynamic. Anthropic/Claude respect cache_control
+        // explicitly; Qwen & other implicit-caching providers ignore it, but
+        // if a future change migrated the breakpoint to the dynamic block,
+        // Anthropic would cache mutating content and miss on every turn.
+        let stable = "## Identity\n\nYou are ZeroClaw.\n\n\
+                      ## Host Environment\n\nHost: testhost | OS: macos\n";
+        let dynamic = "hello";
+
+        let msg = ChatMessage::system_with_stable_prefix(stable, dynamic);
+        let api = OpenRouterProvider::to_history_message(&msg);
+        let json = serde_json::to_value(&api.content).unwrap();
+        let parts = json.as_array().expect("system content must be Parts");
+
+        let cached: Vec<_> = parts
+            .iter()
+            .filter(|p| {
+                p.get("cache_control").and_then(|c| c.get("type"))
+                    == Some(&serde_json::json!("ephemeral"))
+            })
+            .collect();
+        assert_eq!(
+            cached.len(),
+            1,
+            "expected exactly one ephemeral breakpoint, got {cached:?}"
+        );
+        let cached_text = cached[0]["text"]
+            .as_str()
+            .expect("cached part must have text");
+        assert!(
+            cached_text.contains("## Host Environment"),
+            "the single ephemeral breakpoint must cover the stable block (which contains `## Host Environment`); got cached text: {cached_text}"
+        );
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // prompt caching: response-side token mapping (Unit 3)
     // ═══════════════════════════════════════════════════════════════════════
