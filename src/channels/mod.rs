@@ -4291,16 +4291,13 @@ pub fn build_system_prompt_parts_with_mode_and_autonomy(
         dynamic.push_str("- NEVER narrate or describe your tool usage. Do NOT say 'Let me fetch...', 'I will use...', 'Searching...', or similar. Give the FINAL ANSWER only — no intermediate steps, no tool mentions, no progress updates.\n\n");
     }
 
-    // ── 6. Date & Time ──────────────────────────────────────────
-    let now = chrono::Local::now();
-    let _ = writeln!(
-        dynamic,
-        "## Current Date & Time\n\n{} ({})\n",
-        now.format("%Y-%m-%d %H:%M:%S"),
-        now.format("%Z")
-    );
-
-    // ── 7. Runtime ──────────────────────────────────────────────
+    // ── 6. Runtime ──────────────────────────────────────────────
+    // STORY-011 Increment 2: the `## Current Date & Time` header was removed
+    // from this dynamic block. Implicit-caching providers invalidate the
+    // entire prefix on any per-call tail content, and the user-message
+    // `[{now}]` prefix is now the canonical current-time signal. Runtime is
+    // kept here for Increment 4 to split further (Host/OS → stable; Model →
+    // user preamble in Phase B).
     let host =
         hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
     let _ = writeln!(
@@ -9181,6 +9178,39 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(
             !out.contains("## Current Date & Time"),
             "build_dynamic_system_block must not emit a per-call `## Current Date & Time` header; got:\n{out}"
+        );
+    }
+
+    // STORY-011 Increment 2: the agent/CLI-path SystemPromptParts builder
+    // (called at daemon startup to seed `ctx.stable_system_prefix`) must not
+    // emit `## Current Date & Time` into either half of the parts. This is a
+    // separate emission site from `build_dynamic_system_block` and covers
+    // the `run_tool_call_loop` path via `SystemPromptParts`.
+    #[test]
+    fn story_011_system_prompt_parts_omits_current_date_time() {
+        let ws = make_workspace();
+        let parts = build_system_prompt_parts_with_mode_and_autonomy(
+            ws.path(),
+            "qwen/qwen3.6-plus",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            false,
+            crate::config::SkillsPromptInjectionMode::Full,
+            false,
+            0,
+        );
+        assert!(
+            !parts.stable.contains("## Current Date & Time"),
+            "parts.stable must not contain per-call `## Current Date & Time`; got:\n{}",
+            parts.stable
+        );
+        assert!(
+            !parts.dynamic.contains("## Current Date & Time"),
+            "parts.dynamic must not contain per-call `## Current Date & Time`; got:\n{}",
+            parts.dynamic
         );
     }
 
