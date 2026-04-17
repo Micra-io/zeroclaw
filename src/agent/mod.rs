@@ -15,6 +15,7 @@ pub mod personality;
 pub mod prompt;
 pub mod thinking;
 pub mod tool_execution;
+pub mod user_message;
 
 #[cfg(test)]
 mod tests;

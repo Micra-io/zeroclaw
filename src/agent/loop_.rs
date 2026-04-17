@@ -4069,12 +4069,8 @@ pub async fn run(
             .map(|r| build_hardware_context(r, &effective_msg, &board_names, rag_limit))
             .unwrap_or_default();
         let context = format!("{mem_context}{hw_context}");
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-        let enriched = if context.is_empty() {
-            format!("[{now}] {effective_msg}")
-        } else {
-            format!("{context}[{now}] {effective_msg}")
-        };
+        let now = super::user_message::format_now();
+        let enriched = super::user_message::enrich_user_message(&now, &effective_msg, &context);
 
         let mut history = vec![
             build_system_message(
