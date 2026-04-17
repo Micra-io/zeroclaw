@@ -680,20 +680,20 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
     }
 }
 
-/// Build the per-turn dynamic system block: `## Current Date & Time`
-/// followed by `## Runtime`. This is the byte-volatile portion of the
-/// system prompt that lives **after** the Anthropic cache breakpoint, so
-/// the stable prefix (identity, tools, safety, skills, bootstrap) can be
-/// served from the prefix cache while the timestamps and runtime info
-/// are re-sent on every call.
+/// Build the per-turn dynamic system block: currently just `## Runtime`.
+///
+/// STORY-011 Increment 1 removed the `## Current Date & Time` header from
+/// this block. Implicit-caching providers (Qwen, DeepSeek, Groq, OpenAI,
+/// Moonshot) cache the longest byte-identical prefix across requests, so
+/// the timestamp cannot live anywhere inside the system message without
+/// invalidating the cache on every call. The `[{now}]` prefix on the
+/// user-facing message is now the canonical current-time signal; see
+/// Phase B of STORY-011 for the user-message wiring.
 fn build_dynamic_system_block(model: &str) -> String {
-    let now = chrono::Local::now();
     let host =
         hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
     format!(
-        "## Current Date & Time\n\n{} ({})\n\n## Runtime\n\nHost: {host} | OS: {} | Model: {model}\n",
-        now.format("%Y-%m-%d %H:%M:%S"),
-        now.format("%Z"),
+        "## Runtime\n\nHost: {host} | OS: {} | Model: {model}\n",
         std::env::consts::OS,
     )
 }
@@ -9168,6 +9168,20 @@ BTC is currently around $65,000 based on latest tool output."#
             "missing Date/Time"
         );
         assert!(prompt.contains("## Runtime"), "missing Runtime section");
+    }
+
+    // STORY-011 Increment 1: the per-turn dynamic block must not carry a
+    // `## Current Date & Time` header. Implicit-caching providers (Qwen,
+    // DeepSeek, Groq, OpenAI, Moonshot) match on the longest byte-identical
+    // prefix across calls; a timestamp inside the system message invalidates
+    // the entire prefix on every request.
+    #[test]
+    fn story_011_dynamic_system_block_omits_current_date_time() {
+        let out = build_dynamic_system_block("qwen/qwen3.6-plus");
+        assert!(
+            !out.contains("## Current Date & Time"),
+            "build_dynamic_system_block must not emit a per-call `## Current Date & Time` header; got:\n{out}"
+        );
     }
 
     #[test]
