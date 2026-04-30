@@ -4179,6 +4179,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
                     wa.self_chat_mode,
                     wa.allowed_groups.clone(),
                     wa.mention_name.clone(),
+                    None, // cron delivery: no passive observer store
                 )))
             }
             #[cfg(not(feature = "whatsapp-web"))]
@@ -4747,6 +4748,7 @@ fn collect_configured_channels(
                                     wa.self_chat_mode,
                                     wa.allowed_groups.clone(),
                                     wa.mention_name.clone(),
+                                    Some(config.workspace_dir.clone()),
                                 )
                                 .with_transcription(config.transcription.clone())
                                 .with_tts(config.tts.clone())

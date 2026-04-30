@@ -35,6 +35,8 @@ use std::sync::Arc;
 use tokio::select;
 use wa_rs_proto::whatsapp::device_props::PlatformType;
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
+use zeroclaw_infra::session_backend::SessionBackend;
+use zeroclaw_infra::session_sqlite::SqliteSessionBackend;
 
 /// WhatsApp Web channel using wa-rs with custom rusqlite storage
 ///
@@ -101,6 +103,9 @@ pub struct WhatsAppWebChannel {
     /// When non-empty, only group messages matching at least one pattern are
     /// processed; matched fragments are stripped from the forwarded content.
     group_mention_patterns: Arc<Vec<regex::Regex>>,
+    /// Passive observer store — writes all group messages (including non-mention)
+    /// to sessions.db for downstream scanner consumption.
+    observe_store: Option<Arc<SqliteSessionBackend>>,
 }
 
 impl WhatsAppWebChannel {
@@ -133,6 +138,7 @@ impl WhatsAppWebChannel {
         self_chat_mode: bool,
         allowed_groups: Vec<String>,
         mention_name: Option<String>,
+        workspace_dir: Option<std::path::PathBuf>,
     ) -> Self {
         // Seed bot_phone from pair_phone (digits only)
         let bot_phone = pair_phone
@@ -147,6 +153,17 @@ impl WhatsAppWebChannel {
                 will be skipped until identity is known."
             );
         }
+
+        let observe_store = workspace_dir.and_then(|dir| match SqliteSessionBackend::new(&dir) {
+            Ok(backend) => {
+                tracing::info!("WhatsApp Web: passive observer store enabled");
+                Some(Arc::new(backend))
+            }
+            Err(e) => {
+                tracing::warn!("WhatsApp Web: failed to open observer store: {e}");
+                None
+            }
+        });
 
         Self {
             session_path,
@@ -171,6 +188,7 @@ impl WhatsAppWebChannel {
             voice_chats: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             dm_mention_patterns: Arc::new(Vec::new()),
             group_mention_patterns: Arc::new(Vec::new()),
+            observe_store,
         }
     }
 
@@ -1145,6 +1163,7 @@ impl Channel for WhatsAppWebChannel {
             let bot_phone_clone = self.bot_phone.clone();
             let wa_dm_mention_patterns = self.dm_mention_patterns.clone();
             let wa_group_mention_patterns = self.group_mention_patterns.clone();
+            let observe_store = self.observe_store.clone();
 
             let mut builder = Bot::builder()
                 .with_backend(backend)
@@ -1172,6 +1191,7 @@ impl Channel for WhatsAppWebChannel {
                     let mention_name = mention_name.clone();
                     let wa_dm_mention_patterns = wa_dm_mention_patterns.clone();
                     let wa_group_mention_patterns = wa_group_mention_patterns.clone();
+                    let observe_store = observe_store.clone();
                     async move {
                         match event {
                             Event::Message(msg, info) => {
@@ -1300,6 +1320,11 @@ impl Channel for WhatsAppWebChannel {
                                     return;
                                 }
 
+                                // Detect contact shares — they bypass the mention_only filter
+                                // and are passively stored unconditionally for group chats.
+                                let is_contact = msg.contact_message.is_some()
+                                    || msg.contacts_array_message.is_some();
+
                                 // Attempt voice note transcription (ptt = push-to-talk = voice note).
                                 // When `transcribe_non_ptt_audio` is enabled in the transcription
                                 // config, also transcribe forwarded / regular audio messages.
@@ -1400,8 +1425,22 @@ impl Channel for WhatsAppWebChannel {
                                     return;
                                 }
 
-                                // mention_only: skip group messages without a bot mention
-                                let content = if mention_only && is_group {
+                                // Passively store group contact shares for scanner.
+                                if is_group && is_contact && let Some(ref store) = observe_store {
+                                    let session_key = format!("observe_whatsapp_{chat}");
+                                    let formatted = format!("[{normalized}] {content}");
+                                    let turn = zeroclaw_api::provider::ChatMessage {
+                                        role: "user".to_string(),
+                                        content: formatted,
+                                    };
+                                    if let Err(e) = store.append(&session_key, &turn) {
+                                        tracing::warn!("WhatsApp Web: failed to write passive contact observation: {e}");
+                                    }
+                                }
+
+                                // mention_only: skip group messages without a bot mention.
+                                // Contact shares bypass this filter (is_contact=true).
+                                let content = if mention_only && is_group && !is_contact {
                                     let bot_phone = bot_phone_inner.lock();
                                     if let Some(ref bp) = *bot_phone {
                                         let mentioned_jids =
@@ -1411,6 +1450,22 @@ impl Channel for WhatsAppWebChannel {
                                             &mentioned_jids,
                                             bp,
                                         ) {
+                                            // Passive observation: store non-mention group
+                                            // messages for downstream scanner consumption.
+                                            if let Some(ref store) = observe_store {
+                                                let text = msg.text_content().unwrap_or("").to_string();
+                                                if !text.is_empty() {
+                                                    let session_key = format!("observe_whatsapp_{chat}");
+                                                    let formatted = format!("[{normalized}] {text}");
+                                                    let turn = zeroclaw_api::provider::ChatMessage {
+                                                        role: "user".to_string(),
+                                                        content: formatted,
+                                                    };
+                                                    if let Err(e) = store.append(&session_key, &turn) {
+                                                        tracing::warn!("WhatsApp Web: failed to write passive observation: {e}");
+                                                    }
+                                                }
+                                            }
                                             tracing::debug!(
                                                 "WhatsApp Web: ignoring group message without bot mention"
                                             );
@@ -1459,6 +1514,22 @@ impl Channel for WhatsAppWebChannel {
                                                 }
                                                 stripped
                                             } else {
+                                                // Passive observation: store non-mention group
+                                                // messages for downstream scanner consumption.
+                                                if let Some(ref store) = observe_store {
+                                                    let text = msg.text_content().unwrap_or("").to_string();
+                                                    if !text.is_empty() {
+                                                        let session_key = format!("observe_whatsapp_{chat}");
+                                                        let formatted = format!("[{normalized}] {text}");
+                                                        let turn = zeroclaw_api::provider::ChatMessage {
+                                                            role: "user".to_string(),
+                                                            content: formatted,
+                                                        };
+                                                        if let Err(e) = store.append(&session_key, &turn) {
+                                                            tracing::warn!("WhatsApp Web: failed to write passive observation: {e}");
+                                                        }
+                                                    }
+                                                }
                                                 tracing::debug!(
                                                     "WhatsApp Web: mention_only=true, no mention found in group message from {}, skipping",
                                                     normalized
@@ -1807,6 +1878,7 @@ impl WhatsAppWebChannel {
         _self_chat_mode: bool,
         _allowed_groups: Vec<String>,
         _mention_name: Option<String>,
+        _workspace_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self { _private: () }
     }
@@ -1880,6 +1952,7 @@ mod tests {
             false,
             vec![],     // allowed_groups
             None,       // mention_name
+            None,       // workspace_dir
         )
     }
 
@@ -1913,6 +1986,7 @@ mod tests {
             false,
             vec![],     // allowed_groups
             None,       // mention_name
+            None,       // workspace_dir
         );
         assert!(ch.is_number_allowed("+1234567890"));
         assert!(ch.is_number_allowed("+9999999999"));
@@ -1933,6 +2007,7 @@ mod tests {
             false,
             vec![],     // allowed_groups
             None,       // mention_name
+            None,       // workspace_dir
         );
         // Empty allowlist means "deny all" (matches channel-wide allowlist policy).
         assert!(!ch.is_number_allowed("+1234567890"));
@@ -2293,6 +2368,7 @@ mod tests {
             false,
             vec![],     // allowed_groups
             None,       // mention_name
+            None,       // workspace_dir
         );
         assert_eq!(*ch.bot_phone.lock(), Some("919211916069".to_string()));
     }
@@ -2312,6 +2388,7 @@ mod tests {
             false,
             vec![],     // allowed_groups
             None,       // mention_name
+            None,       // workspace_dir
         );
         assert_eq!(*ch.bot_phone.lock(), None);
     }
@@ -2436,5 +2513,32 @@ mod tests {
             format_contact_line("Pedro Garcia", None),
             "[Contact] Pedro Garcia"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn observe_store_writes_non_mention_group_messages() {
+        use zeroclaw_infra::session_backend::SessionBackend;
+        use zeroclaw_infra::session_sqlite::SqliteSessionBackend;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let group_jid = "120363407668337348@g.us";
+        let sender = "+34622922443";
+        let content = "Hey, does anyone know a good plumber?";
+        let session_key = format!("observe_whatsapp_{group_jid}");
+        let formatted = format!("[{sender}] {content}");
+
+        let turn = zeroclaw_api::provider::ChatMessage {
+            role: "user".to_string(),
+            content: formatted.clone(),
+        };
+        backend.append(&session_key, &turn).unwrap();
+
+        let loaded = backend.load(&session_key);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].role, "user");
+        assert_eq!(loaded[0].content, formatted);
     }
 }
