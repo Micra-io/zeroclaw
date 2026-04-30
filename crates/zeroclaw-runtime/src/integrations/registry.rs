@@ -880,6 +880,8 @@ mod tests {
             ack_reactions: None,
             proxy_url: None,
             approval_timeout_secs: 120,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         });
         let entries = all_integrations();
         let tg = entries.iter().find(|e| e.name == "Telegram").unwrap();

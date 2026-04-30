@@ -4136,6 +4136,8 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
                     tg.bot_token.clone(),
                     tg.allowed_users.clone(),
                     tg.mention_only,
+                    tg.allowed_chats.clone(),
+                    tg.allowed_dm_users.clone(),
                 )
                 .with_ack_reactions(ack)
                 .with_streaming(tg.stream_mode, tg.draft_update_interval_ms)
@@ -4599,6 +4601,8 @@ fn collect_configured_channels(
                         tg.bot_token.clone(),
                         tg.allowed_users.clone(),
                         tg.mention_only,
+                        tg.allowed_chats.clone(),
+                        tg.allowed_dm_users.clone(),
                     )
                     .with_ack_reactions(ack)
                     .with_streaming(tg.stream_mode, tg.draft_update_interval_ms)
@@ -6000,6 +6004,8 @@ pub async fn deliver_announcement(
                 tg.bot_token.clone(),
                 tg.allowed_users.clone(),
                 tg.mention_only,
+                tg.allowed_chats.clone(),
+                tg.allowed_dm_users.clone(),
             );
             zeroclaw_api::channel::Channel::send(&ch, &SendMessage::new(&safe_output, target))
                 .await?;
@@ -11925,6 +11931,8 @@ This is an example JSON object for profile settings."#;
             ack_reactions: None,
             proxy_url: None,
             approval_timeout_secs: 120,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         });
         match build_channel_by_id(&config, "telegram") {
             Ok(channel) => assert_eq!(channel.name(), "telegram"),

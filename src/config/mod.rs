@@ -81,6 +81,8 @@ mod tests {
             ack_reactions: None,
             proxy_url: None,
             approval_timeout_secs: 120,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         };
 
         let discord = DiscordConfig {

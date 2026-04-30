@@ -1052,6 +1052,8 @@ mod tests {
             ack_reactions: None,
             proxy_url: None,
             approval_timeout_secs: 120,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         });
         assert!(has_supervised_channels(&config));
     }
@@ -1198,6 +1200,8 @@ mod tests {
             ack_reactions: None,
             proxy_url: None,
             approval_timeout_secs: 120,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         });
 
         let target = resolve_heartbeat_delivery(&config).unwrap();
@@ -1218,6 +1222,8 @@ mod tests {
             ack_reactions: None,
             proxy_url: None,
             approval_timeout_secs: 120,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         });
 
         let target = resolve_heartbeat_delivery(&config).unwrap();
