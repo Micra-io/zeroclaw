@@ -146,14 +146,18 @@ pub fn estimate_history_tokens(history: &[ChatMessage]) -> usize {
 /// Trim conversation history to prevent unbounded growth.
 /// Preserves the system prompt (first message if role=system) and the most recent messages.
 ///
-/// When `chunked` is true, the trim only fires once the non-system message
-/// count exceeds `2 * max_history`, then drains back down to `max_history`
-/// in a single batch. This keeps the conversation prefix byte-stable for
-/// `max_history` turns at a time, so the Anthropic message-level cache
-/// breakpoint (`apply_cache_to_last_message`) stays valid across turns
-/// instead of being invalidated on every front drop. When `chunked` is
-/// false, the original per-turn behaviour is preserved: drop as soon as
-/// the count exceeds `max_history`.
+/// `max_history` is a **soft target** when `chunked` is true (the default
+/// runtime mode). The effective ceiling is `2 * max_history` non-system
+/// messages: trim is a no-op until the non-system count exceeds that
+/// threshold, then drains back down to `max_history` in a single batch.
+/// This keeps the conversation prefix byte-stable for `max_history` turns
+/// at a time so the Anthropic message-level cache breakpoint
+/// (`apply_cache_to_last_message`) stays valid across turns instead of
+/// being invalidated on every front drop.
+///
+/// When `chunked` is false, `max_history` is a **strict cap**: trim fires
+/// every turn the count exceeds `max_history`, matching the pre-PR-#30
+/// behaviour.
 pub fn trim_history(history: &mut Vec<ChatMessage>, max_history: usize, chunked: bool) {
     let has_system = history.first().is_some_and(|m| m.role == "system");
     let non_system_count = if has_system {
