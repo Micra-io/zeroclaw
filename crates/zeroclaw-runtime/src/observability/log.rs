@@ -40,6 +40,7 @@ impl Observer for LogObserver {
                 tool,
                 duration,
                 success,
+                ..
             } => {
                 let ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
                 info!(tool = %tool, duration_ms = ms, success = success, "tool.call");
@@ -85,6 +86,7 @@ impl Observer for LogObserver {
                 error_message,
                 input_tokens,
                 output_tokens,
+                ..
             } => {
                 let ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
                 info!(
@@ -218,8 +220,15 @@ mod tests {
             duration: Duration::from_millis(150),
             success: true,
             error_message: None,
+            system_prompt: None,
+            input_messages: Vec::new(),
+            tool_definitions: Vec::new(),
             input_tokens: Some(100),
             output_tokens: Some(50),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            output_text: None,
+            output_tool_calls: Vec::new(),
         });
         obs.record_event(&ObserverEvent::LlmResponse {
             provider: "openrouter".into(),
@@ -227,13 +236,23 @@ mod tests {
             duration: Duration::from_millis(200),
             success: false,
             error_message: Some("rate limited".into()),
+            system_prompt: None,
+            input_messages: Vec::new(),
+            tool_definitions: Vec::new(),
             input_tokens: None,
             output_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            output_text: None,
+            output_tool_calls: Vec::new(),
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "shell".into(),
+            tool_call_id: None,
             duration: Duration::from_millis(10),
             success: false,
+            arguments: None,
+            result: None,
         });
         obs.record_event(&ObserverEvent::ChannelMessage {
             channel: "telegram".into(),

@@ -731,6 +731,7 @@ impl Provider for OpenRouterProvider {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
                 cached_input_tokens: cached,
+                ..Default::default()
             }
         });
         let message = native_response
@@ -942,6 +943,7 @@ impl Provider for OpenRouterProvider {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
                 cached_input_tokens: cached,
+                ..Default::default()
             }
         });
         let message = native_response
@@ -1984,6 +1986,7 @@ mod tests {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
                 cached_input_tokens: cached,
+                ..Default::default()
             }
         });
         let usage = usage.unwrap();
@@ -2005,6 +2008,7 @@ mod tests {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
                 cached_input_tokens: cached,
+                ..Default::default()
             }
         });
         let usage = usage.unwrap();
@@ -2028,6 +2032,7 @@ mod tests {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
                 cached_input_tokens: cached,
+                ..Default::default()
             }
         });
         let usage = usage.unwrap();

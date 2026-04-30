@@ -2033,6 +2033,7 @@ impl Provider for OpenAiCompatibleProvider {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
             cached_input_tokens: None,
+            ..Default::default()
         });
         let choice = chat_response
             .choices
@@ -2172,6 +2173,7 @@ impl Provider for OpenAiCompatibleProvider {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
             cached_input_tokens: None,
+            ..Default::default()
         });
         let message = native_response
             .choices

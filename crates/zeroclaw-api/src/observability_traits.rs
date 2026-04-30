@@ -1,33 +1,135 @@
 use std::time::Duration;
 
+/// Owned snapshot of a single chat message for observability events.
+///
+/// Carries full message bodies into observers without depending on the provider
+/// crate's `ChatMessage` type being re-exported. Built via `From<&ChatMessage>`.
+#[derive(Debug, Clone)]
+pub struct MessageSnapshot {
+    pub role: String,
+    pub content: String,
+}
+
+/// Owned snapshot of a tool definition for observability events.
+///
+/// Carries the tool list registered for an LLM call. Built via `From<&ToolSpec>`.
+#[derive(Debug, Clone)]
+pub struct ToolSpecSnapshot {
+    pub name: String,
+    pub description: String,
+    /// JSON schema for the tool's parameters, serialized as a string so the
+    /// observability layer doesn't need to re-export the structured type.
+    pub parameters_json: String,
+}
+
+/// Owned snapshot of a tool call requested by the LLM.
+///
+/// Used by observability events to surface what the model asked the agent to
+/// invoke. Built via `From<&ToolCall>`.
+#[derive(Debug, Clone)]
+pub struct ToolCallSnapshot {
+    pub id: String,
+    pub name: String,
+    /// Tool arguments as a JSON string (already serialized by the provider).
+    pub arguments_json: String,
+}
+
+// ── Snapshot From impls ───────────────────────────────────────────────────
+
+impl From<&crate::provider::ChatMessage> for MessageSnapshot {
+    fn from(msg: &crate::provider::ChatMessage) -> Self {
+        Self {
+            role: msg.role.clone(),
+            content: msg.content.clone(),
+        }
+    }
+}
+
+impl From<&crate::tool::ToolSpec> for ToolSpecSnapshot {
+    fn from(spec: &crate::tool::ToolSpec) -> Self {
+        Self {
+            name: spec.name.clone(),
+            description: spec.description.clone(),
+            parameters_json: serde_json::to_string(&spec.parameters)
+                .unwrap_or_else(|_| "{}".to_string()),
+        }
+    }
+}
+
+impl From<&crate::provider::ToolCall> for ToolCallSnapshot {
+    fn from(call: &crate::provider::ToolCall) -> Self {
+        Self {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments_json: call.arguments.clone(),
+        }
+    }
+}
+
 /// Discrete events emitted by the agent runtime for observability.
 ///
 /// Each variant represents a lifecycle event that observers can record,
-/// aggregate, or forward to external monitoring systems. Events carry
-/// just enough context for tracing and diagnostics without exposing
-/// sensitive prompt or response content.
+/// aggregate, or forward to external monitoring systems. As of Tier 2, LLM
+/// events carry full payloads (system prompt, input/output messages, tool
+/// definitions, tool call args/results) so OTel exporters can emit the
+/// `gen_ai.*` semantic-convention attributes Langfuse and other LLM-aware
+/// backends recognize.
 #[derive(Debug, Clone)]
 pub enum ObserverEvent {
     /// The agent orchestration loop has started a new session.
     AgentStart { provider: String, model: String },
     /// A request is about to be sent to an LLM provider.
     ///
-    /// This is emitted immediately before a provider call so observers can print
-    /// user-facing progress without leaking prompt contents.
+    /// Emitted immediately before a provider call. Stays minimal — observers
+    /// that want the full request/response payload should use `LlmResponse`,
+    /// which carries both sides of the call so a single span can be built
+    /// post-hoc with both input and output attached.
     LlmRequest {
         provider: String,
         model: String,
         messages_count: usize,
     },
     /// Result of a single LLM provider call.
+    ///
+    /// As of Tier 2, carries the **full** request and response payload so
+    /// OTel exporters can build a single span with both `gen_ai.input.*` and
+    /// `gen_ai.output.*` semantic-convention attributes. The agent loop
+    /// captures the input snapshots immediately before the provider call and
+    /// passes them through here alongside the response.
     LlmResponse {
         provider: String,
         model: String,
         duration: Duration,
         success: bool,
         error_message: Option<String>,
+        // ── Input side (snapshot taken before the call) ────────────
+        /// System prompt content extracted from the conversation history.
+        /// `None` when no `role=system` message is present.
+        system_prompt: Option<String>,
+        /// Full input message snapshots in send order. Empty for callers that
+        /// don't have a history list available (e.g. gateway single-shot path).
+        input_messages: Vec<MessageSnapshot>,
+        /// Tool definitions registered with this call. Empty when the agent
+        /// is in non-tool mode or the caller has no tool registry in scope.
+        tool_definitions: Vec<ToolSpecSnapshot>,
+        // ── Output side (from the provider response) ───────────────
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        /// Tokens read from the provider's prompt cache (Anthropic
+        /// `cache_read_input_tokens`). Non-zero when the system prompt and
+        /// tools are cached. Observers should sum all three to get the true
+        /// total prompt token count.
+        cache_read_input_tokens: Option<u64>,
+        /// Tokens written to the provider's prompt cache on this call
+        /// (Anthropic `cache_creation_input_tokens`). Non-zero on the first
+        /// call that primes the cache; usually zero on subsequent calls.
+        cache_creation_input_tokens: Option<u64>,
+        /// Assistant text response. May be empty when the model returned only
+        /// tool calls. `None` on failure.
+        output_text: Option<String>,
+        /// Tool calls the model requested in this response. Empty when the
+        /// model returned only text or when the call failed.
+        output_tool_calls: Vec<ToolCallSnapshot>,
     },
     /// The agent session has finished.
     ///
@@ -42,13 +144,25 @@ pub enum ObserverEvent {
     /// A tool call is about to be executed.
     ToolCallStart {
         tool: String,
+        /// Provider-assigned tool call identifier (e.g. Anthropic `tool_use.id`,
+        /// OpenAI `tool_calls[].id`). `None` for text-parsed (XML/markdown) calls.
+        tool_call_id: Option<String>,
+        /// Full JSON arguments. `None` when unavailable at the call site.
         arguments: Option<String>,
     },
     /// A tool call has completed with a success/failure outcome.
     ToolCall {
         tool: String,
+        /// Provider-assigned tool call identifier. See `ToolCallStart::tool_call_id`.
+        tool_call_id: Option<String>,
         duration: Duration,
         success: bool,
+        /// Full JSON arguments (duplicated from ToolCallStart so stateless
+        /// exporters can build a complete span from this event alone).
+        arguments: Option<String>,
+        /// Scrubbed tool output or error text. Already passed through
+        /// `scrub_credentials` by the caller.
+        result: Option<String>,
     },
     /// The agent produced a final answer for the current user message.
     TurnComplete,
@@ -247,8 +361,11 @@ mod tests {
     fn observer_event_and_metric_are_cloneable() {
         let event = ObserverEvent::ToolCall {
             tool: "shell".into(),
+            tool_call_id: Some("call_abc123".into()),
             duration: Duration::from_millis(10),
             success: true,
+            arguments: Some(r#"{"command":"date"}"#.into()),
+            result: Some("Mon Apr 22 12:00:00 UTC 2026\n".into()),
         };
         let metric = ObserverMetric::RequestLatency(Duration::from_millis(8));
 

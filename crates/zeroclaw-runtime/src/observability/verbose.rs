@@ -46,6 +46,7 @@ impl Observer for VerboseObserver {
                 tool,
                 duration,
                 success,
+                ..
             } => {
                 let ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
                 eprintln!("< Tool {tool} (success={success}, duration_ms={ms})");
@@ -93,17 +94,28 @@ mod tests {
             duration: Duration::from_millis(12),
             success: true,
             error_message: None,
+            system_prompt: None,
+            input_messages: Vec::new(),
+            tool_definitions: Vec::new(),
             input_tokens: Some(50),
             output_tokens: Some(25),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            output_text: None,
+            output_tool_calls: Vec::new(),
         });
         obs.record_event(&ObserverEvent::ToolCallStart {
             tool: "shell".into(),
+            tool_call_id: None,
             arguments: None,
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "shell".into(),
+            tool_call_id: None,
             duration: Duration::from_millis(2),
             success: true,
+            arguments: None,
+            result: None,
         });
         obs.record_event(&ObserverEvent::TurnComplete);
     }
