@@ -1227,6 +1227,10 @@ impl Agent {
                                 })
                                 .await;
                         }
+                        zeroclaw_providers::traits::StreamEvent::Usage(_) => {
+                            // Usage events are handled by the tool-call loop;
+                            // the gateway streaming path ignores them.
+                        }
                         zeroclaw_providers::traits::StreamEvent::Final => break,
                     },
                     Err(_) => break,
