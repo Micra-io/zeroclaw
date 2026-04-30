@@ -470,18 +470,23 @@ fn warn_if_high_frequency_agent_job(job: &CronJob) {
 
 async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> Result<()> {
     let delivery: &DeliveryConfig = &job.delivery;
-    if !delivery.mode.eq_ignore_ascii_case("announce") {
+
+    // Determine if delivery is requested:
+    // - Explicit "announce" mode (legacy format)
+    // - Channel set with no mode / empty mode (simplified format)
+    // - "none" mode → skip delivery
+    let has_channel = delivery.channel.as_deref().is_some_and(|c| !c.is_empty());
+    let mode = delivery.mode.trim().to_ascii_lowercase();
+    if mode == "none" || (!has_channel && mode != "announce") {
         return Ok(());
     }
 
     let channel = delivery
         .channel
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("delivery.channel is required for announce mode"))?;
-    let target = delivery
-        .to
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("delivery.to is required for announce mode"))?;
+        .ok_or_else(|| anyhow::anyhow!("delivery.channel is required for delivery"))?;
+    // `to` is optional for live-channel delivery (channel knows its target)
+    let target = delivery.to.as_deref().unwrap_or("");
 
     deliver_announcement(config, channel, target, output).await
 }
