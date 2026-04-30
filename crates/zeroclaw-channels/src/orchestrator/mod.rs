@@ -5140,14 +5140,21 @@ fn build_channel_by_id(
                 Arc::new(move || cfg_arc.read().channel_external_peers("telegram", &alias))
             };
             Ok(Arc::new(
-                TelegramChannel::new(tg.bot_token.clone(), alias, peer_resolver, tg.mention_only)
-                    .with_persistence(config_arc.clone())
-                    .with_ack_reactions(ack)
-                    .with_streaming(tg.stream_mode, tg.draft_update_interval_ms)
-                    .with_transcription(config.transcription.clone())
-                    .with_tts(&config)
-                    .with_workspace_dir(config.data_dir.clone())
-                    .with_approval_timeout_secs(tg.approval_timeout_secs),
+                TelegramChannel::new(
+                    tg.bot_token.clone(),
+                    alias,
+                    peer_resolver,
+                    tg.mention_only,
+                    tg.allowed_chats.clone(),
+                    tg.allowed_dm_users.clone(),
+                )
+                .with_persistence(config_arc.clone())
+                .with_ack_reactions(ack)
+                .with_streaming(tg.stream_mode, tg.draft_update_interval_ms)
+                .with_transcription(config.transcription.clone())
+                .with_tts(&config)
+                .with_workspace_dir(config.data_dir.clone())
+                .with_approval_timeout_secs(tg.approval_timeout_secs),
             ))
         }
         #[cfg(not(feature = "channel-telegram"))]
@@ -5929,6 +5936,8 @@ fn collect_configured_channels(
                     alias.clone(),
                     peer_resolver,
                     tg.mention_only,
+                    tg.allowed_chats.clone(),
+                    tg.allowed_dm_users.clone(),
                 )
                 .with_persistence(config_arc.clone())
                 .with_ack_reactions(ack)
@@ -8318,8 +8327,14 @@ pub async fn deliver_announcement(
             let peers = config.channel_external_peers("telegram", alias);
             let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> =
                 Arc::new(move || peers.clone());
-            let ch =
-                TelegramChannel::new(tg.bot_token.clone(), alias, peer_resolver, tg.mention_only);
+            let ch = TelegramChannel::new(
+                tg.bot_token.clone(),
+                alias,
+                peer_resolver,
+                tg.mention_only,
+                tg.allowed_chats.clone(),
+                tg.allowed_dm_users.clone(),
+            );
             zeroclaw_api::channel::Channel::send(&ch, &make_msg(&safe_output)).await?;
         }
         #[cfg(not(feature = "channel-telegram"))]
@@ -16422,6 +16437,8 @@ This is an example JSON object for profile settings."#;
                 proxy_url: None,
                 approval_timeout_secs: 120,
                 excluded_tools: vec![],
+                allowed_chats: vec![],
+                allowed_dm_users: vec![],
             },
         );
         let config_arc = Arc::new(RwLock::new(config));

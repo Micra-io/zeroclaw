@@ -10286,6 +10286,18 @@ pub struct TelegramConfig {
     /// are not exposed to the model when responding via this channel.
     #[serde(default)]
     pub excluded_tools: Vec<String>,
+    /// Allowed chat IDs or keywords. Empty = allow all (no filtering).
+    /// Keywords: "dm" (private chats), "group" (groups + supergroups), "*" (all).
+    /// Numeric chat IDs for explicit matches (e.g. "-1001234567890").
+    /// Telegram "channel" type chats have no keyword — use explicit ID or "*".
+    #[serde(default)]
+    pub allowed_chats: Vec<String>,
+    /// Users allowed to DM the bot. Empty = allow all (no restriction).
+    /// When set, only these users can send direct messages to the bot.
+    /// Group messages are unaffected — governed by allowed_users + allowed_chats.
+    /// Supports usernames (without @) and numeric Telegram user IDs.
+    #[serde(default)]
+    pub allowed_dm_users: Vec<String>,
 }
 
 impl ChannelConfig for TelegramConfig {
@@ -16242,6 +16254,8 @@ auto_save = true
                         proxy_url: None,
                         approval_timeout_secs: default_telegram_approval_timeout_secs(),
                         excluded_tools: vec![],
+                        allowed_chats: vec![],
+                        allowed_dm_users: vec![],
                     },
                 )]),
                 discord: HashMap::new(),
@@ -17203,6 +17217,8 @@ default_temperature = 0.7
             proxy_url: None,
             approval_timeout_secs: 120,
             excluded_tools: vec![],
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         };
         let json = serde_json::to_string(&tc).unwrap();
         let parsed: TelegramConfig = serde_json::from_str(&json).unwrap();
@@ -19852,6 +19868,8 @@ require_otp_to_resume = true
                 proxy_url: None,
                 approval_timeout_secs: default_telegram_approval_timeout_secs(),
                 excluded_tools: vec![],
+                allowed_chats: vec![],
+                allowed_dm_users: vec![],
             },
         );
 

@@ -1284,6 +1284,8 @@ mod tests {
                 proxy_url: None,
                 approval_timeout_secs: 120,
                 excluded_tools: vec![],
+                allowed_chats: vec![],
+                allowed_dm_users: vec![],
             },
         );
         assert!(has_supervised_channels(&config));
@@ -1455,6 +1457,8 @@ mod tests {
                 proxy_url: None,
                 approval_timeout_secs: 120,
                 excluded_tools: vec![],
+                allowed_chats: vec![],
+                allowed_dm_users: vec![],
             },
         );
 
@@ -1480,6 +1484,8 @@ mod tests {
                 proxy_url: None,
                 approval_timeout_secs: 120,
                 excluded_tools: vec![],
+                allowed_chats: vec![],
+                allowed_dm_users: vec![],
             },
         );
         // Inbound peer authorization lives in peer_groups in V3.

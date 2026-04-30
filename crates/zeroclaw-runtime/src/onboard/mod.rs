@@ -2538,6 +2538,10 @@ mod tests {
             // Vec<String> with #[serde(default)]; empty answer keeps the
             // default empty list. Same shape as proxy-url above.
             .with("excluded-tools", "")
+            // New Vec<String> fields added in overlay commit 2.6 (allowed_chats
+            // + allowed_dm_users). Empty answer keeps the default empty list.
+            .with("allowed-chats", "")
+            .with("allowed-dm-users", "")
             .with_sequence("Channel", ["telegram", "Done"]);
         Box::pin(run(&mut cfg, &mut ui, Some(Section::Channels), &flags))
             .await

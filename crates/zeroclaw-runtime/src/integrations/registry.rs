@@ -236,6 +236,8 @@ mod tests {
                 proxy_url: None,
                 approval_timeout_secs: 120,
                 excluded_tools: vec![],
+                allowed_chats: vec![],
+                allowed_dm_users: vec![],
             },
         );
         let entries = all_integrations(&config);
