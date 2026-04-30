@@ -54,6 +54,7 @@ impl Memory for NamespacedMemory {
                 session_id,
                 Some(&self.namespace),
                 None,
+                None,
             )
             .await
     }
@@ -150,6 +151,7 @@ impl Memory for NamespacedMemory {
         session_id: Option<&str>,
         _namespace: Option<&str>,
         importance: Option<f64>,
+        metadata: Option<&str>,
     ) -> anyhow::Result<()> {
         // Always use the configured namespace, ignoring any provided namespace
         self.inner
@@ -160,6 +162,7 @@ impl Memory for NamespacedMemory {
                 session_id,
                 Some(&self.namespace),
                 importance,
+                metadata,
             )
             .await
     }

@@ -2699,13 +2699,21 @@ async fn process_channel_message(
         && !zeroclaw_memory::should_skip_autosave_content(&msg.content)
     {
         let autosave_key = conversation_memory_key(&msg);
+        let metadata = if msg.reply_target.ends_with("@g.us") {
+            Some(format!(r#"{{"group_jid":"{}"}}"#, msg.reply_target))
+        } else {
+            None
+        };
         let _ = ctx
             .memory
-            .store(
+            .store_with_metadata(
                 &autosave_key,
                 &msg.content,
                 zeroclaw_memory::MemoryCategory::Conversation,
                 Some(&history_key),
+                None,
+                None,
+                metadata.as_deref(),
             )
             .await;
     }
@@ -8306,6 +8314,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 namespace: "default".into(),
                 importance: None,
                 superseded_by: None,
+            metadata: None,
             }])
         }
 
