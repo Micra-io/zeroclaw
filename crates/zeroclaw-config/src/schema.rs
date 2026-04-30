@@ -1541,6 +1541,16 @@ pub struct AgentConfig {
     /// behavior). Default: `2`.
     #[serde(default = "default_keep_tool_context_turns")]
     pub keep_tool_context_turns: usize,
+
+    /// When `true`, `trim_history` only fires once the history exceeds
+    /// `2 * max_history_messages` and trims back down to
+    /// `max_history_messages` in a single batch, keeping the conversation
+    /// prefix byte-stable for `max_history_messages` turns at a time so
+    /// the Anthropic message-level cache breakpoint hits reliably. Set to
+    /// `false` to restore the per-turn trim behaviour (drops one message
+    /// the moment the count exceeds `max_history_messages`). Default: `true`.
+    #[serde(default = "default_agent_history_trim_chunked")]
+    pub history_trim_chunked: bool,
 }
 
 fn default_max_tool_result_chars() -> usize {
@@ -1549,6 +1559,10 @@ fn default_max_tool_result_chars() -> usize {
 
 fn default_keep_tool_context_turns() -> usize {
     2
+}
+
+fn default_agent_history_trim_chunked() -> bool {
+    true
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -1591,6 +1605,7 @@ impl Default for AgentConfig {
             context_compression: crate::scattered_types::ContextCompressionConfig::default(),
             max_tool_result_chars: default_max_tool_result_chars(),
             keep_tool_context_turns: default_keep_tool_context_turns(),
+            history_trim_chunked: default_agent_history_trim_chunked(),
         }
     }
 }

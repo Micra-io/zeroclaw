@@ -1432,6 +1432,7 @@ impl Channel for WhatsAppWebChannel {
                                     let turn = zeroclaw_api::provider::ChatMessage {
                                         role: "user".to_string(),
                                         content: formatted,
+                                        stable_prefix: None,
                                     };
                                     if let Err(e) = store.append(&session_key, &turn) {
                                         tracing::warn!("WhatsApp Web: failed to write passive contact observation: {e}");
@@ -1460,6 +1461,7 @@ impl Channel for WhatsAppWebChannel {
                                                     let turn = zeroclaw_api::provider::ChatMessage {
                                                         role: "user".to_string(),
                                                         content: formatted,
+                                                        stable_prefix: None,
                                                     };
                                                     if let Err(e) = store.append(&session_key, &turn) {
                                                         tracing::warn!("WhatsApp Web: failed to write passive observation: {e}");
@@ -1524,6 +1526,7 @@ impl Channel for WhatsAppWebChannel {
                                                         let turn = zeroclaw_api::provider::ChatMessage {
                                                             role: "user".to_string(),
                                                             content: formatted,
+                                                            stable_prefix: None,
                                                         };
                                                         if let Err(e) = store.append(&session_key, &turn) {
                                                             tracing::warn!("WhatsApp Web: failed to write passive observation: {e}");
@@ -2533,6 +2536,7 @@ mod tests {
         let turn = zeroclaw_api::provider::ChatMessage {
             role: "user".to_string(),
             content: formatted.clone(),
+            stable_prefix: None,
         };
         backend.append(&session_key, &turn).unwrap();
 
