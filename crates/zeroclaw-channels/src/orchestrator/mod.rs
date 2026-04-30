@@ -376,6 +376,8 @@ struct ChannelRuntimeContext {
     ack_reactions: bool,
     show_tool_calls: bool,
     session_store: Option<Arc<zeroclaw_infra::session_store::SessionStore>>,
+    /// SQLite observe store — reads passive group observations for context injection.
+    observe_store: Option<Arc<zeroclaw_infra::session_sqlite::SqliteSessionBackend>>,
     /// Non-interactive approval manager for channel-driven runs.
     /// Enforces `auto_approve` / `always_ask` / supervised policy from
     /// `[autonomy]` config; auto-denies tools that would need interactive
@@ -630,6 +632,73 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
         ),
         _ => None,
     }
+}
+
+/// Load recent group conversation from the observe store and format as a
+/// transcript section for system prompt injection.
+///
+/// Returns an empty string if no recent messages are found.
+fn load_group_context(
+    observe_store: &zeroclaw_infra::session_sqlite::SqliteSessionBackend,
+    group_jid: &str,
+    window_minutes: u64,
+    max_messages: usize,
+    max_chars: usize,
+) -> String {
+    let session_key = format!("observe_whatsapp_{group_jid}");
+
+    // Try time-windowed messages first.
+    let since = chrono::Utc::now() - chrono::Duration::minutes(window_minutes as i64);
+    let time_messages = observe_store.load_since_with_time(&session_key, since);
+
+    // If the time window returned fewer than max_messages, also load the
+    // last N messages regardless of time and use whichever set is larger.
+    // This ensures context is available even when the group has been quiet.
+    let messages = if time_messages.len() >= max_messages {
+        // Time window already has plenty — just cap it.
+        time_messages[time_messages.len() - max_messages..].to_vec()
+    } else {
+        let last_n = observe_store.load_last_n_with_time(&session_key, max_messages);
+        if last_n.len() > time_messages.len() {
+            last_n
+        } else {
+            time_messages
+        }
+    };
+
+    if messages.is_empty() {
+        return String::new();
+    }
+
+    // Format with timestamps so the LLM can reason about recency
+    let mut lines: Vec<String> = messages
+        .iter()
+        .map(|m| {
+            let time = chrono::DateTime::parse_from_rfc3339(&m.created_at)
+                .map(|dt| dt.format("%H:%M").to_string())
+                .unwrap_or_default();
+            if time.is_empty() {
+                m.message.content.clone()
+            } else {
+                format!("[{time}] {}", m.message.content)
+            }
+        })
+        .collect();
+
+    // Truncate from the front if over char budget
+    let mut total_chars: usize = lines.iter().map(|l| l.len() + 1).sum(); // +1 for newline
+    while total_chars > max_chars && lines.len() > 1 {
+        total_chars -= lines[0].len() + 1;
+        lines.remove(0);
+    }
+
+    let header = "## Recent Group Conversation\n\n\
+        The following messages were sent in this group before you were mentioned \
+        (timestamps in UTC, most recent last). Pay close attention to the last few \
+        messages — they represent the current conversation flow. Reference them when \
+        relevant.\n";
+
+    format!("{header}\n{}", lines.join("\n"))
 }
 
 fn build_channel_system_prompt(
@@ -2868,6 +2937,30 @@ async fn process_channel_message(
     );
     if !memory_context.is_empty() {
         let _ = write!(system_prompt, "\n\n{memory_context}");
+    }
+    // ── Group context injection ──────────────────────────────────
+    // For group mentions, inject recent non-mention messages from the
+    // observe store so the agent understands the conversation context.
+    if msg.reply_target.ends_with("@g.us") {
+        let window = ctx.prompt_config.channels.group_context_window_minutes;
+        let max_msgs = ctx.prompt_config.channels.group_context_max_messages;
+        if window > 0 && let Some(ref obs) = ctx.observe_store {
+            let group_context = load_group_context(
+                obs,
+                &msg.reply_target,
+                window,
+                max_msgs,
+                2000,
+            );
+            if !group_context.is_empty() {
+                tracing::info!(
+                    channel = %msg.channel,
+                    group_jid = %msg.reply_target,
+                    "Injecting group context into system prompt"
+                );
+                let _ = write!(system_prompt, "\n\n{group_context}");
+            }
+        }
     }
     let mut history = vec![ChatMessage::system(system_prompt)];
     history.extend(prior_turns);
@@ -5758,6 +5851,20 @@ pub async fn start_channels(config: Config) -> Result<()> {
         } else {
             None
         },
+        observe_store: if config.channels.group_context_window_minutes > 0 {
+            match zeroclaw_infra::session_sqlite::SqliteSessionBackend::new(&config.workspace_dir) {
+                Ok(store) => {
+                    tracing::info!("Group context observe store enabled");
+                    Some(Arc::new(store))
+                }
+                Err(e) => {
+                    tracing::warn!("Group context observe store disabled: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        },
         approval_manager: Arc::new(ApprovalManager::for_non_interactive(&config.autonomy)),
         activated_tools: ch_activated_handle,
         cost_tracking: zeroclaw_runtime::cost::CostTracker::get_or_init_global(
@@ -6339,6 +6446,7 @@ mod tests {
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -6465,6 +6573,7 @@ mod tests {
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -6548,6 +6657,7 @@ mod tests {
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -6648,6 +6758,7 @@ mod tests {
             ack_reactions: true,
             show_tool_calls: true,
             session_store: Some(Arc::clone(&store)),
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -7249,6 +7360,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -7341,6 +7453,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -7447,6 +7560,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -7538,6 +7652,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -7639,6 +7754,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -7761,6 +7877,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -7864,6 +7981,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -7982,6 +8100,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -8085,6 +8204,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -8181,6 +8301,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -8404,6 +8525,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -8518,6 +8640,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -8650,6 +8773,7 @@ BTC is currently around $65,000 based on latest tool output."#
             autonomy_level: AutonomyLevel::default(),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -8781,6 +8905,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -8889,6 +9014,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -8978,6 +9104,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -9067,6 +9194,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -9862,6 +9990,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -10008,6 +10137,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -10195,6 +10325,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -10313,6 +10444,7 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -10937,6 +11069,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -11035,6 +11168,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -11165,6 +11299,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -11343,6 +11478,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -11465,6 +11601,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -11579,6 +11716,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -11713,6 +11851,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -12029,6 +12168,7 @@ This is an example JSON object for profile settings."#;
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
+            observe_store: None,
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &zeroclaw_config::schema::AutonomyConfig::default(),
             )),
@@ -12260,4 +12400,370 @@ This is an example JSON object for profile settings."#;
         assert!(prompt_b.contains("sender=user_bbb"));
         assert_ne!(prompt_a, prompt_b);
     }
+    // ── load_group_context tests (Task 2.5) ────────────────────────────
+    mod group_context {
+        use super::*;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        fn make_store(tmp: &TempDir) -> Arc<SqliteSessionBackend> {
+            Arc::new(SqliteSessionBackend::new(tmp.path()).unwrap())
+        }
+
+        #[test]
+        fn load_group_context_formats_recent_messages() {
+            let tmp = TempDir::new().unwrap();
+            let store = make_store(&tmp);
+
+            let now = chrono::Utc::now();
+            let recent = now - chrono::Duration::minutes(5);
+            {
+                let conn = store.conn.lock();
+                for (i, msg) in ["[+111] Hello everyone", "[+222] Anyone know a plumber?", "[+333] Try Pedro"]
+                    .iter()
+                    .enumerate()
+                {
+                    let ts = (recent + chrono::Duration::seconds(i as i64 * 60)).to_rfc3339();
+                    conn.execute(
+                        "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, 'user', ?2, ?3)",
+                        rusqlite::params!["observe_whatsapp_group123@g.us", msg, ts],
+                    ).unwrap();
+                }
+            }
+
+            let result = load_group_context(store.as_ref(), "group123@g.us", 15, 30, 2000);
+            assert!(result.contains("Recent Group Conversation"), "got: {result}");
+            // Timestamps should be prepended as [HH:MM]
+            let expected_time = recent.format("%H:%M").to_string();
+            assert!(
+                result.contains(&format!("[{expected_time}] [+111] Hello everyone")),
+                "got: {result}"
+            );
+        }
+
+        #[test]
+        fn load_group_context_returns_empty_for_quiet_group() {
+            let tmp = TempDir::new().unwrap();
+            let store = make_store(&tmp);
+
+            let result = load_group_context(store.as_ref(), "quiet_group@g.us", 15, 30, 2000);
+            assert!(result.is_empty());
+        }
+
+        #[test]
+        fn load_group_context_truncates_to_max_messages() {
+            let tmp = TempDir::new().unwrap();
+            let store = make_store(&tmp);
+
+            let now = chrono::Utc::now();
+            {
+                let conn = store.conn.lock();
+                for i in 0..10_i64 {
+                    let ts = (now - chrono::Duration::seconds(10 - i)).to_rfc3339();
+                    conn.execute(
+                        "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, 'user', ?2, ?3)",
+                        rusqlite::params!["observe_whatsapp_busy@g.us", format!("[+{i}] msg {i}"), ts],
+                    ).unwrap();
+                }
+            }
+
+            let result = load_group_context(store.as_ref(), "busy@g.us", 15, 3, 2000);
+            // Should only contain last 3 messages (7, 8, 9)
+            assert!(result.contains("msg 7"), "got: {result}");
+            assert!(result.contains("msg 8"), "got: {result}");
+            assert!(result.contains("msg 9"), "got: {result}");
+            assert!(!result.contains("msg 0"), "got: {result}");
+        }
+
+        #[test]
+        fn load_group_context_falls_back_to_last_n_when_window_empty() {
+            let tmp = TempDir::new().unwrap();
+            let store = make_store(&tmp);
+
+            // Insert messages older than the 15-minute window
+            {
+                let conn = store.conn.lock();
+                for i in 0..5_i64 {
+                    let ts = format!("2026-03-20T10:{:02}:00+00:00", i);
+                    conn.execute(
+                        "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, 'user', ?2, ?3)",
+                        rusqlite::params!["observe_whatsapp_old_group@g.us", format!("[+{i}] old msg {i}"), ts],
+                    ).unwrap();
+                }
+            }
+
+            // Time-based query returns nothing → fallback to last N
+            let result = load_group_context(store.as_ref(), "old_group@g.us", 15, 30, 2000);
+            assert!(
+                result.contains("old msg 0"),
+                "fallback should include old messages, got: {result}"
+            );
+            assert!(result.contains("old msg 4"), "got: {result}");
+        }
+
+        #[test]
+        fn load_group_context_truncates_to_max_chars() {
+            let tmp = TempDir::new().unwrap();
+            let store = make_store(&tmp);
+
+            let now = chrono::Utc::now();
+            {
+                let conn = store.conn.lock();
+                for i in 0..5_i64 {
+                    let ts = (now - chrono::Duration::seconds(5 - i)).to_rfc3339();
+                    let long_msg = format!("[+{i}] {}", "x".repeat(200));
+                    conn.execute(
+                        "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, 'user', ?2, ?3)",
+                        rusqlite::params!["observe_whatsapp_verbose@g.us", long_msg, ts],
+                    ).unwrap();
+                }
+            }
+
+            // 300 chars budget — should truncate, keeping most recent messages
+            let result = load_group_context(store.as_ref(), "verbose@g.us", 15, 30, 300);
+            assert!(result.contains("Recent Group Conversation"));
+            assert!(result.contains("[+4]")); // most recent kept
+        }
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_injects_group_context_for_mentions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let observe = Arc::new(SqliteSessionBackend::new(tmp.path()).unwrap());
+
+        // Seed observe store with recent group messages
+        {
+            let now = chrono::Utc::now();
+            let conn = observe.conn.lock();
+            for (i, msg) in [
+                "[+111] Does anyone know a plumber?",
+                "[+222] Try Pedro at +34655444333",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let ts = (now - chrono::Duration::seconds(60 - i as i64 * 30)).to_rfc3339();
+                conn.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) \
+                     VALUES (?1, 'user', ?2, ?3)",
+                    rusqlite::params!["observe_whatsapp_testgroup@g.us", msg, ts],
+                )
+                .unwrap();
+            }
+        }
+
+        let channel_impl = Arc::new(RecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let provider_impl = Arc::new(HistoryCaptureProvider::default());
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: provider_impl.clone(),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(MAX_CONVERSATION_SENDERS).unwrap(),
+            ))),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
+            provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            prompt_config: Arc::new(zeroclaw_config::schema::Config::default()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: zeroclaw_config::schema::MultimodalConfig::default(),
+            media_pipeline: zeroclaw_config::schema::MediaPipelineConfig::default(),
+            transcription_config: zeroclaw_config::schema::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(Vec::new()),
+            query_classification: zeroclaw_config::schema::QueryClassificationConfig::default(),
+            ack_reactions: false,
+            show_tool_calls: true,
+            session_store: None,
+            observe_store: Some(observe.clone()),
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &zeroclaw_config::schema::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: zeroclaw_config::schema::PacingConfig::default(),
+            max_tool_result_chars: 0,
+            context_token_budget: 0,
+            debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
+                Duration::ZERO,
+            )),
+        });
+
+        process_channel_message(
+            runtime_ctx.clone(),
+            zeroclaw_api::channel::ChannelMessage {
+                id: "msg-group-1".to_string(),
+                sender: "+999".to_string(),
+                reply_target: "testgroup@g.us".to_string(),
+                content: "claw, who recommended a plumber?".to_string(),
+                channel: "test-channel".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        let calls = provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 1, "expected exactly one provider call");
+        // calls[0][0] is the system message
+        assert_eq!(calls[0][0].0, "system");
+        assert!(
+            calls[0][0].1.contains("Recent Group Conversation"),
+            "system prompt should contain group context header, got: {}",
+            calls[0][0].1
+        );
+        assert!(
+            calls[0][0].1.contains("plumber"),
+            "system prompt should contain seeded group messages, got: {}",
+            calls[0][0].1
+        );
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_skips_group_context_for_dms() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let observe = Arc::new(SqliteSessionBackend::new(tmp.path()).unwrap());
+
+        // Seed observe store with messages under a DM-style key (no @g.us)
+        {
+            let now = chrono::Utc::now();
+            let conn = observe.conn.lock();
+            let ts = (now - chrono::Duration::seconds(30)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO sessions (session_key, role, content, created_at) \
+                 VALUES (?1, 'user', ?2, ?3)",
+                rusqlite::params!["observe_whatsapp_+12345678", "[+111] plumber info", ts],
+            )
+            .unwrap();
+        }
+
+        let channel_impl = Arc::new(RecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let provider_impl = Arc::new(HistoryCaptureProvider::default());
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: provider_impl.clone(),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(MAX_CONVERSATION_SENDERS).unwrap(),
+            ))),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
+            provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            prompt_config: Arc::new(zeroclaw_config::schema::Config::default()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: zeroclaw_config::schema::MultimodalConfig::default(),
+            media_pipeline: zeroclaw_config::schema::MediaPipelineConfig::default(),
+            transcription_config: zeroclaw_config::schema::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(Vec::new()),
+            query_classification: zeroclaw_config::schema::QueryClassificationConfig::default(),
+            ack_reactions: false,
+            show_tool_calls: true,
+            session_store: None,
+            observe_store: Some(observe.clone()),
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &zeroclaw_config::schema::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: zeroclaw_config::schema::PacingConfig::default(),
+            max_tool_result_chars: 0,
+            context_token_budget: 0,
+            debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
+                Duration::ZERO,
+            )),
+        });
+
+        process_channel_message(
+            runtime_ctx.clone(),
+            zeroclaw_api::channel::ChannelMessage {
+                id: "msg-dm-1".to_string(),
+                sender: "+12345678".to_string(),
+                reply_target: "+12345678".to_string(), // DM: no @g.us suffix
+                content: "who recommended a plumber?".to_string(),
+                channel: "test-channel".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        let calls = provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 1, "expected exactly one provider call");
+        assert_eq!(calls[0][0].0, "system");
+        assert!(
+            !calls[0][0].1.contains("Recent Group Conversation"),
+            "DM system prompt must NOT contain group context, got: {}",
+            calls[0][0].1
+        );
+    }
+
 }
