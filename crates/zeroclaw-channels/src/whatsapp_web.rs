@@ -60,8 +60,13 @@ pub struct WhatsAppWebChannel {
     pair_code: Option<String>,
     /// Allowed phone numbers (E.164 format) or "*" for all
     allowed_numbers: Vec<String>,
+    /// Allowed group chats (JID, "*", or "dm")
+    allowed_groups: Vec<String>,
     /// When true, only respond to messages that @-mention the bot in groups
     mention_only: bool,
+    /// Bot name for text-based mention detection (case-insensitive).
+    /// Used as fallback when bot phone identity is not yet resolved.
+    mention_name: Option<String>,
     /// Bot phone number (digits only), resolved from pair_phone or device identity at runtime
     bot_phone: Arc<Mutex<Option<String>>>,
     /// Usage mode (business vs personal policy filtering)
@@ -112,7 +117,10 @@ impl WhatsAppWebChannel {
     /// * `group_policy` - Group policy when mode = personal
     /// * `mention_only` - When true, only respond to group messages that @-mention the bot
     /// * `self_chat_mode` - Whether to always respond in self-chat when mode = personal
+    /// * `allowed_groups` - Allowed group JIDs ("*" for all, "dm" for DMs only)
+    /// * `mention_name` - Text-based mention name fallback (e.g. "claw"), used when bot phone unknown
     #[cfg(feature = "whatsapp-web")]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_path: String,
         pair_phone: Option<String>,
@@ -123,6 +131,8 @@ impl WhatsAppWebChannel {
         dm_policy: zeroclaw_config::schema::WhatsAppChatPolicy,
         group_policy: zeroclaw_config::schema::WhatsAppChatPolicy,
         self_chat_mode: bool,
+        allowed_groups: Vec<String>,
+        mention_name: Option<String>,
     ) -> Self {
         // Seed bot_phone from pair_phone (digits only)
         let bot_phone = pair_phone
@@ -143,7 +153,9 @@ impl WhatsAppWebChannel {
             pair_phone,
             pair_code,
             allowed_numbers,
+            allowed_groups,
             mention_only,
+            mention_name,
             bot_phone: Arc::new(Mutex::new(bot_phone)),
             mode,
             dm_policy,
@@ -536,6 +548,36 @@ impl WhatsAppWebChannel {
     fn jid_digits(jid: &str) -> String {
         let user_part = jid.split_once('@').map(|(u, _)| u).unwrap_or(jid);
         user_part.chars().filter(|c| c.is_ascii_digit()).collect()
+    }
+
+    /// Check if message text contains the bot's mention name (case-insensitive).
+    #[cfg(feature = "whatsapp-web")]
+    fn contains_mention_name(text: &str, mention_name: &str) -> bool {
+        text.to_lowercase().contains(&mention_name.to_lowercase())
+    }
+
+    /// Check whether a chat JID is allowed by the `allowed_groups` policy.
+    ///
+    /// - empty slice — allow all (no restriction)
+    /// - `"*"` — allow all chats
+    /// - `"dm"` — allow direct messages only
+    /// - explicit JID — prefix or full JID match
+    #[cfg(feature = "whatsapp-web")]
+    fn is_chat_allowed(chat: &str, sender: &str, allowed_groups: &[String]) -> bool {
+        if allowed_groups.is_empty() {
+            return true;
+        }
+        let chat_prefix = chat.split('@').next().unwrap_or("");
+        let is_dm = chat.ends_with("@s.whatsapp.net") || chat_prefix == sender;
+
+        let allow_all = allowed_groups.iter().any(|g| g == "*");
+        let allow_dm = allowed_groups.iter().any(|g| g == "dm");
+        let explicit_match = allowed_groups.iter().any(|g| {
+            let g_id = g.split('@').next().unwrap_or("");
+            g_id == chat_prefix || g == chat
+        });
+
+        allow_all || (is_dm && allow_dm) || explicit_match
     }
 
     /// Extract mentioned JIDs from the base (unwrapped) message's context_info.
@@ -1098,6 +1140,8 @@ impl Channel for WhatsAppWebChannel {
             let wa_group_policy = self.group_policy.clone();
             let wa_self_chat_mode = self.self_chat_mode;
             let mention_only = self.mention_only;
+            let mention_name = self.mention_name.clone();
+            let allowed_groups = self.allowed_groups.clone();
             let bot_phone_clone = self.bot_phone.clone();
             let wa_dm_mention_patterns = self.dm_mention_patterns.clone();
             let wa_group_mention_patterns = self.group_mention_patterns.clone();
@@ -1124,6 +1168,8 @@ impl Channel for WhatsAppWebChannel {
                     let wa_dm_policy = wa_dm_policy.clone();
                     let wa_group_policy = wa_group_policy.clone();
                     let bot_phone_inner = bot_phone_clone.clone();
+                    let allowed_groups = allowed_groups.clone();
+                    let mention_name = mention_name.clone();
                     let wa_dm_mention_patterns = wa_dm_mention_patterns.clone();
                     let wa_group_mention_patterns = wa_group_mention_patterns.clone();
                     async move {
@@ -1245,6 +1291,15 @@ impl Channel for WhatsAppWebChannel {
 
                                 let normalized = normalized.unwrap_or_else(|| sender.clone());
 
+                                // Check allowed_groups policy
+                                if !Self::is_chat_allowed(&chat, &sender, &allowed_groups) {
+                                    tracing::debug!(
+                                        "WhatsApp Web: chat {} not in allowed_groups, ignoring message from {}",
+                                        chat, normalized
+                                    );
+                                    return;
+                                }
+
                                 // Attempt voice note transcription (ptt = push-to-talk = voice note).
                                 // When `transcribe_non_ptt_audio` is enabled in the transcription
                                 // config, also transcribe forwarded / regular audio messages.
@@ -1335,10 +1390,49 @@ impl Channel for WhatsAppWebChannel {
                                             }
                                         }
                                     } else {
-                                        tracing::debug!(
-                                            "WhatsApp Web: mention_only active but bot identity unknown, skipping group msg"
-                                        );
-                                        return;
+                                        // Bot phone identity not yet resolved — try text-based
+                                        // mention_name fallback (e.g. "claw") before giving up.
+                                        if let Some(ref name) = mention_name {
+                                            if Self::contains_mention_name(&content, name) {
+                                                // Strip the mention name from the message before
+                                                // forwarding so the agent sees clean input.
+                                                // Use case-insensitive find + replace_range so
+                                                // the original casing of the rest of the message
+                                                // is preserved (only the matched span is removed).
+                                                let stripped = {
+                                                    let lower = content.to_lowercase();
+                                                    let name_lower = name.to_lowercase();
+                                                    if let Some(idx) = lower.find(&name_lower) {
+                                                        let mut s = content.to_string();
+                                                        s.replace_range(
+                                                            idx..idx + name_lower.len(),
+                                                            "",
+                                                        );
+                                                        s.trim().to_string()
+                                                    } else {
+                                                        content.trim().to_string()
+                                                    }
+                                                };
+                                                if stripped.is_empty() {
+                                                    tracing::debug!(
+                                                        "WhatsApp Web: message empty after stripping mention_name"
+                                                    );
+                                                    return;
+                                                }
+                                                stripped
+                                            } else {
+                                                tracing::debug!(
+                                                    "WhatsApp Web: mention_only=true, no mention found in group message from {}, skipping",
+                                                    normalized
+                                                );
+                                                return;
+                                            }
+                                        } else {
+                                            tracing::debug!(
+                                                "WhatsApp Web: mention_only active but bot identity unknown, skipping group msg"
+                                            );
+                                            return;
+                                        }
                                     }
                                 } else {
                                     content
@@ -1633,6 +1727,7 @@ pub struct WhatsAppWebChannel {
 
 #[cfg(not(feature = "whatsapp-web"))]
 impl WhatsAppWebChannel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         _session_path: String,
         _pair_phone: Option<String>,
@@ -1643,6 +1738,8 @@ impl WhatsAppWebChannel {
         _dm_policy: zeroclaw_config::schema::WhatsAppChatPolicy,
         _group_policy: zeroclaw_config::schema::WhatsAppChatPolicy,
         _self_chat_mode: bool,
+        _allowed_groups: Vec<String>,
+        _mention_name: Option<String>,
     ) -> Self {
         Self { _private: () }
     }
@@ -1714,6 +1811,8 @@ mod tests {
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             false,
+            vec![],     // allowed_groups
+            None,       // mention_name
         )
     }
 
@@ -1745,6 +1844,8 @@ mod tests {
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             false,
+            vec![],     // allowed_groups
+            None,       // mention_name
         );
         assert!(ch.is_number_allowed("+1234567890"));
         assert!(ch.is_number_allowed("+9999999999"));
@@ -1763,6 +1864,8 @@ mod tests {
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             false,
+            vec![],     // allowed_groups
+            None,       // mention_name
         );
         // Empty allowlist means "deny all" (matches channel-wide allowlist policy).
         assert!(!ch.is_number_allowed("+1234567890"));
@@ -2121,6 +2224,8 @@ mod tests {
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             false,
+            vec![],     // allowed_groups
+            None,       // mention_name
         );
         assert_eq!(*ch.bot_phone.lock(), Some("919211916069".to_string()));
     }
@@ -2138,6 +2243,8 @@ mod tests {
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             false,
+            vec![],     // allowed_groups
+            None,       // mention_name
         );
         assert_eq!(*ch.bot_phone.lock(), None);
     }
