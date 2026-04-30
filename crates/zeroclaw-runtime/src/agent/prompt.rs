@@ -4,7 +4,6 @@ use crate::security::AutonomyLevel;
 use crate::skills::Skill;
 use crate::tools::Tool;
 use anyhow::Result;
-use chrono::{Datelike, Local, Timelike};
 use std::fmt::Write;
 use std::path::Path;
 use zeroclaw_config::schema::IdentityConfig;
@@ -40,9 +39,12 @@ pub struct SystemPromptBuilder {
 
 impl SystemPromptBuilder {
     pub fn with_defaults() -> Self {
+        // STORY-011 Increment 3: `DateTimeSection` removed from defaults.
+        // The per-call date/time signal now lives only in the user-facing
+        // message preamble (Phase B), so implicit-caching providers see a
+        // byte-identical system prefix across calls.
         Self {
             sections: vec![
-                Box::new(DateTimeSection),
                 Box::new(IdentitySection),
                 Box::new(ToolHonestySection),
                 Box::new(ToolsSection),
@@ -81,7 +83,6 @@ pub struct SafetySection;
 pub struct SkillsSection;
 pub struct WorkspaceSection;
 pub struct RuntimeSection;
-pub struct DateTimeSection;
 pub struct ChannelMediaSection;
 
 impl PromptSection for IdentitySection {
@@ -239,37 +240,16 @@ impl PromptSection for RuntimeSection {
         "runtime"
     }
 
-    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+    fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
+        // STORY-011 Increment 6: Host + OS are daemon-restart-stable and
+        // live in the stable prefix. Model was dropped because it mutates
+        // mid-session via `/model` — it now ships in the user-message
+        // preamble (see `agent::user_message::enrich_user_message`).
         let host =
             hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
         Ok(format!(
-            "## Runtime\n\nHost: {host} | OS: {} | Model: {}",
+            "## Host Environment\n\nHost: {host} | OS: {}",
             std::env::consts::OS,
-            ctx.model_name
-        ))
-    }
-}
-
-impl PromptSection for DateTimeSection {
-    fn name(&self) -> &str {
-        "datetime"
-    }
-
-    fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
-        let now = Local::now();
-        // Force Gregorian year to avoid confusion with local calendars (e.g. Buddhist calendar).
-        let (year, month, day) = (now.year(), now.month(), now.day());
-        let (hour, minute, second) = (now.hour(), now.minute(), now.second());
-        let tz = now.format("%Z");
-
-        Ok(format!(
-            "## CRITICAL CONTEXT: CURRENT DATE & TIME\n\n\
-             The following is the ABSOLUTE TRUTH regarding the current date and time. \
-             Use this for all relative time calculations (e.g. \"last 7 days\").\n\n\
-             Date: {year:04}-{month:02}-{day:02}\n\
-             Time: {hour:02}:{minute:02}:{second:02} ({tz})\n\
-             ISO 8601: {year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}{}",
-            now.format("%:z")
         ))
     }
 }
@@ -477,29 +457,63 @@ mod tests {
         assert!(output.contains("<name>deploy.release_checklist</name>"));
     }
 
+    // STORY-011 Increment 3: the Agent-path SystemPromptBuilder must not emit
+    // a per-call date/time section via DateTimeSection. This is the third
+    // system-message emission site (after build_dynamic_system_block and
+    // build_system_prompt_with_mode_and_autonomy in system_prompt.rs).
+    // Implicit-caching providers need a byte-identical prefix across calls.
     #[test]
-    fn datetime_section_includes_timestamp_and_timezone() {
-        let tools: Vec<Box<dyn Tool>> = vec![];
+    fn story_011_default_prompt_builder_omits_date_time_section() {
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(TestTool)];
         let ctx = PromptContext {
             workspace_dir: Path::new("/tmp"),
-            model_name: "test-model",
+            model_name: "qwen/qwen3.6-plus",
             tools: &tools,
             skills: &[],
             skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
             identity_config: None,
-            dispatcher_instructions: "instr",
-
+            dispatcher_instructions: "",
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
         };
+        let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        assert!(
+            !prompt.contains("CURRENT DATE & TIME"),
+            "SystemPromptBuilder::with_defaults() must not emit a date/time section; got:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("## Current Date & Time"),
+            "SystemPromptBuilder::with_defaults() must not emit a date/time section; got:\n{prompt}"
+        );
+    }
 
-        let rendered = DateTimeSection.build(&ctx).unwrap();
-        assert!(rendered.starts_with("## CRITICAL CONTEXT: CURRENT DATE & TIME\n\n"));
-
-        let payload = rendered.trim_start_matches("## CRITICAL CONTEXT: CURRENT DATE & TIME\n\n");
-        assert!(payload.chars().any(|c| c.is_ascii_digit()));
-        assert!(payload.contains("Date:"));
-        assert!(payload.contains("Time:"));
+    // STORY-011 Increment 6: the Agent-path SystemPromptBuilder must not emit
+    // the `Model:` name (it mutates mid-session via `/model`). The model name
+    // ships in the user-message preamble instead so the stable prefix stays
+    // byte-identical across `/model` switches.
+    #[test]
+    fn story_011_default_prompt_builder_omits_model_name() {
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(TestTool)];
+        let ctx = PromptContext {
+            workspace_dir: Path::new("/tmp"),
+            model_name: "qwen/qwen3.6-plus",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            security_summary: None,
+            autonomy_level: AutonomyLevel::Supervised,
+        };
+        let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        assert!(
+            !prompt.contains("Model:"),
+            "SystemPromptBuilder::with_defaults() must not emit `Model:`; got:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("qwen/qwen3.6-plus"),
+            "SystemPromptBuilder::with_defaults() must not emit the model name; got:\n{prompt}"
+        );
     }
 
     #[test]

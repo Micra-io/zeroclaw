@@ -709,24 +709,12 @@ fn build_channel_system_prompt(
 ) -> String {
     let mut prompt = base_prompt.to_string();
 
-    // Refresh the stale datetime in the cached system prompt
-    {
-        let now = chrono::Local::now();
-        let fresh = format!(
-            "## Current Date & Time\n\n{} ({})\n",
-            now.format("%Y-%m-%d %H:%M:%S"),
-            now.format("%Z"),
-        );
-        if let Some(start) = prompt.find("## Current Date & Time\n\n") {
-            // Find the end of this section (next "## " heading or end of string)
-            let rest = &prompt[start + 24..]; // skip past "## Current Date & Time\n\n"
-            let section_end = rest
-                .find("\n## ")
-                .map(|i| start + 24 + i)
-                .unwrap_or(prompt.len());
-            prompt.replace_range(start..section_end, fresh.trim_end());
-        }
-    }
+    // STORY-011: The `## Current Date & Time` refresh is intentionally
+    // removed. Per-call timestamps now live in the user-message preamble
+    // (via `zeroclaw_runtime::agent::user_message::enrich_user_message`)
+    // so the system block stays byte-identical across turns and
+    // implicit-caching providers (Qwen, DeepSeek, Groq, OpenAI, Moonshot)
+    // can reuse the prefix cache.
 
     if let Some(instructions) = channel_delivery_instructions(channel_name) {
         if prompt.is_empty() {
@@ -2807,12 +2795,32 @@ async fn process_channel_message(
             .is_some_and(|turns| !turns.is_empty())
     };
 
+    // Enrich the current user-turn content with a `[{now} | model={m}]`
+    // preamble so both the per-turn timestamp and the active model name
+    // live in the user message rather than the system block. Keeping
+    // these out of the system block preserves a byte-identical stable
+    // prefix across turns on implicit-caching providers
+    // (Qwen/DeepSeek/Groq/OpenAI/Moonshot). Memory recall below still
+    // queries on raw `msg.content` so the retrieval vector isn't polluted
+    // by the preamble.
+    let now_for_user_turn = zeroclaw_runtime::agent::user_message::format_now();
+    let enriched_user_content = zeroclaw_runtime::agent::user_message::enrich_user_message(
+        &now_for_user_turn,
+        route.model.as_str(),
+        &msg.content,
+        "",
+    );
+
     // Preserve user turn before the LLM call so interrupted requests keep context.
-    append_sender_turn(ctx.as_ref(), &history_key, ChatMessage::user(&msg.content));
+    append_sender_turn(
+        ctx.as_ref(),
+        &history_key,
+        ChatMessage::user(&enriched_user_content),
+    );
 
     // Build history from per-sender conversation cache.
     let prior_turns_raw = if force_fresh_session {
-        vec![ChatMessage::user(&msg.content)]
+        vec![ChatMessage::user(&enriched_user_content)]
     } else {
         ctx.conversation_histories
             .lock()
@@ -3688,7 +3696,11 @@ async fn process_channel_message(
                 );
                 let should_rollback_user_turn = should_rollback_failed_user_turn(&e);
                 let rolled_back = should_rollback_user_turn
-                    && rollback_orphan_user_turn(ctx.as_ref(), &history_key, &msg.content);
+                    && rollback_orphan_user_turn(
+                        ctx.as_ref(),
+                        &history_key,
+                        &enriched_user_content,
+                    );
 
                 if !rolled_back {
                     // Close the orphan user turn so subsequent messages don't
@@ -9264,10 +9276,17 @@ BTC is currently around $65,000 based on latest tool output."#
             "missing Project Context"
         );
         assert!(
-            prompt.contains("## Current Date & Time"),
-            "missing Date/Time"
+            !prompt.contains("## Current Date & Time"),
+            "STORY-011: Date/Time must not appear in the system prompt; got:\n{prompt}"
         );
-        assert!(prompt.contains("## Runtime"), "missing Runtime section");
+        assert!(
+            !prompt.contains("## Runtime"),
+            "STORY-011: `## Runtime` must not appear in the system prompt (Host/OS moved to `## Host Environment`, Model moves to user preamble); got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("## Host Environment"),
+            "missing `## Host Environment` section (replacement for stable Host/OS fields); got:\n{prompt}"
+        );
     }
 
     #[test]
@@ -9401,9 +9420,47 @@ BTC is currently around $65,000 based on latest tool output."#
         let ws = make_workspace();
         let prompt = build_system_prompt(ws.path(), "claude-sonnet-4", &[], &[], None, None);
 
-        assert!(prompt.contains("Model: claude-sonnet-4"));
+        // STORY-011: Host + OS live in the stable `## Host Environment`
+        // section. Model is intentionally absent from the system prompt —
+        // it mutates mid-session via `/model` and is now emitted in the
+        // user-message preamble instead (Phase B).
+        assert!(
+            prompt.contains("## Host Environment"),
+            "missing `## Host Environment` section; got:\n{prompt}"
+        );
         assert!(prompt.contains(&format!("OS: {}", std::env::consts::OS)));
         assert!(prompt.contains("Host:"));
+        assert!(
+            !prompt.contains("Model: claude-sonnet-4"),
+            "STORY-011: Model must not appear in the system prompt; got:\n{prompt}"
+        );
+    }
+
+    // STORY-011 Increment 2: the channel-path system prompt must not emit
+    // `## Current Date & Time` into either the stable or dynamic half.
+    #[test]
+    fn story_011_system_prompt_omits_current_date_time() {
+        let ws = make_workspace();
+        let prompt = build_system_prompt(ws.path(), "qwen/qwen3.6-plus", &[], &[], None, None);
+        assert!(
+            !prompt.contains("## Current Date & Time"),
+            "STORY-011: system prompt must not contain per-call `## Current Date & Time`; got:\n{prompt}"
+        );
+    }
+
+    // STORY-011 Increment 4: the stable prefix must be byte-identical across
+    // different model_name arguments so `/model` switches don't invalidate the
+    // implicit-caching prefix.
+    #[test]
+    fn story_011_stable_prompt_byte_identical_across_models() {
+        let ws = make_workspace();
+        let prompt_qwen = build_system_prompt(ws.path(), "qwen/qwen3.6-plus", &[], &[], None, None);
+        let prompt_claude =
+            build_system_prompt(ws.path(), "anthropic/claude-sonnet-4.6", &[], &[], None, None);
+        assert_eq!(
+            prompt_qwen, prompt_claude,
+            "stable prefix must survive /model mid-session; differing bytes would invalidate the cache"
+        );
     }
 
     #[test]
@@ -10049,14 +10106,20 @@ BTC is currently around $65,000 based on latest tool output."#
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].len(), 2);
+        // STORY-011 Increment 7: +1 trailing user-role `[{now}]` preamble
+        // injected before every LLM call inside the tool loop.
+        assert_eq!(calls[0].len(), 3);
         assert_eq!(calls[0][0].0, "system");
         assert_eq!(calls[0][1].0, "user");
-        assert_eq!(calls[1].len(), 4);
+        assert_eq!(calls[0][2].0, "user");
+        assert!(calls[0][2].1.starts_with("[2"));
+        assert_eq!(calls[1].len(), 5);
         assert_eq!(calls[1][0].0, "system");
         assert_eq!(calls[1][1].0, "user");
         assert_eq!(calls[1][2].0, "assistant");
         assert_eq!(calls[1][3].0, "user");
+        assert_eq!(calls[1][4].0, "user");
+        assert!(calls[1][4].1.starts_with("[2"));
         assert!(calls[1][1].1.contains("hello"));
         assert!(calls[1][2].1.contains("response-1"));
         assert!(calls[1][3].1.contains("follow up"));
@@ -10367,13 +10430,24 @@ BTC is currently around $65,000 based on latest tool output."#
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].len(), 2);
+        // STORY-011 Increment 7: +1 trailing user-role `[{now}]` preamble
+        // injected before every LLM call inside the tool loop.
+        assert_eq!(calls[0].len(), 3);
         // Memory context is injected into the system prompt, not the user message.
         assert_eq!(calls[0][0].0, "system");
         assert!(calls[0][0].1.contains("[Memory context]"));
         assert!(calls[0][0].1.contains("Age is 45"));
         assert_eq!(calls[0][1].0, "user");
-        assert_eq!(calls[0][1].1, "hello");
+        // User turn carries `[{now}]` timestamp prefix but NOT memory context.
+        let user_turn = &calls[0][1].1;
+        assert!(
+            user_turn.starts_with("[2"),
+            "expected timestamp prefix, got: {user_turn:?}"
+        );
+        assert!(user_turn.contains("hello"));
+        assert!(!user_turn.contains("[Memory context]"));
+        assert_eq!(calls[0][2].0, "user");
+        assert!(calls[0][2].1.starts_with("[2"));
 
         let histories = runtime_ctx
             .conversation_histories
@@ -10383,7 +10457,8 @@ BTC is currently around $65,000 based on latest tool output."#
             .peek("test-channel_chat-ctx_alice")
             .expect("history should be stored for sender");
         assert_eq!(turns[0].role, "user");
-        assert_eq!(turns[0].content, "hello");
+        assert!(turns[0].content.starts_with("[2"));
+        assert!(turns[0].content.contains("hello"));
         assert!(!turns[0].content.contains("[Memory context]"));
     }
 
@@ -10486,13 +10561,16 @@ BTC is currently around $65,000 based on latest tool output."#
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].len(), 4);
+        // STORY-011 Increment 7: +1 trailing user-role `[{now}]` preamble
+        // injected by `run_tool_call_loop` before each LLM call.
+        assert_eq!(calls[0].len(), 5);
 
         let roles = calls[0]
             .iter()
             .map(|(role, _)| role.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(roles, vec!["system", "user", "assistant", "user"]);
+        assert_eq!(roles, vec!["system", "user", "assistant", "user", "user"]);
+        assert!(calls[0][4].1.starts_with("[2"));
         assert!(
             calls[0][0].1.contains("When responding on Telegram:"),
             "telegram channel instructions should be embedded into the system prompt"
@@ -11245,7 +11323,8 @@ This is an example JSON object for profile settings."#;
             .expect("history should exist for sender");
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
-        assert_eq!(turns[0].content, "What is WAL?");
+        assert!(turns[0].content.starts_with("[2"));
+        assert!(turns[0].content.contains("What is WAL?"));
         assert_eq!(turns[1].role, "assistant");
         assert_eq!(turns[1].content, "ok");
         assert!(
@@ -11378,13 +11457,14 @@ This is an example JSON object for profile settings."#;
             .expect("history should exist for sender");
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
-        assert_eq!(turns[0].content, "What is WAL?");
+        assert!(turns[0].content.starts_with("[2"));
+        assert!(turns[0].content.contains("What is WAL?"));
         assert_eq!(turns[1].role, "assistant");
         assert_eq!(turns[1].content, "ok");
         assert!(
             turns
                 .iter()
-                .all(|turn| turn.content != "trigger format error"),
+                .all(|turn| !turn.content.contains("trigger format error")),
             "failed non-retryable turn must not persist in history"
         );
     }

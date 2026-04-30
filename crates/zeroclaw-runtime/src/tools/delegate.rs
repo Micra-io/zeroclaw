@@ -1064,12 +1064,14 @@ impl DelegateTool {
             autonomy_level: crate::security::AutonomyLevel::default(),
         };
 
+        // STORY-011 Increment 3: `DateTimeSection` was removed. The delegate
+        // agent inherits the parent's entry-path timestamp injection and no
+        // longer needs a per-call system-prompt date section.
         let builder = SystemPromptBuilder::default()
             .add_section(Box::new(crate::agent::prompt::ToolsSection))
             .add_section(Box::new(crate::agent::prompt::SafetySection))
             .add_section(Box::new(crate::agent::prompt::SkillsSection))
-            .add_section(Box::new(crate::agent::prompt::WorkspaceSection))
-            .add_section(Box::new(crate::agent::prompt::DateTimeSection));
+            .add_section(Box::new(crate::agent::prompt::WorkspaceSection));
 
         let mut enriched = builder.build(&ctx).unwrap_or_default();
 
@@ -2059,9 +2061,15 @@ mod tests {
             prompt.contains(&workspace.display().to_string()),
             "should contain workspace path"
         );
+        // STORY-011: the delegate-agent prompt no longer emits a
+        // `## CRITICAL CONTEXT: CURRENT DATE & TIME` section. Per-call
+        // date/time must not live inside the system message or
+        // implicit-caching providers (Qwen, DeepSeek, Groq, OpenAI,
+        // Moonshot) invalidate the prefix on every request. Delegate
+        // agents inherit the parent's entry-path user-message timestamp.
         assert!(
-            prompt.contains("## CRITICAL CONTEXT: CURRENT DATE & TIME"),
-            "should contain datetime section"
+            !prompt.contains("## CRITICAL CONTEXT: CURRENT DATE & TIME"),
+            "STORY-011: delegate prompt must not emit DateTimeSection; got:\n{prompt}"
         );
         assert!(
             prompt.contains("You are a code reviewer."),

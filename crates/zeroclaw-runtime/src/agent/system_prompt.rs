@@ -279,25 +279,26 @@ pub fn build_system_prompt_with_mode_and_autonomy(
         load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
     }
 
-    // ── 6. Date & Time ──────────────────────────────────────────
-    let now = chrono::Local::now();
-    let _ = writeln!(
-        prompt,
-        "## Current Date & Time\n\n{} ({})\n",
-        now.format("%Y-%m-%d %H:%M:%S"),
-        now.format("%Z")
-    );
+    // ── 6. Truncation (max_system_prompt_chars budget) ──────────
+    // Applied to the bootstrap content. STORY-011 post-fix: the sections
+    // appended below — Channel Capabilities (config-driven, daemon-stable)
+    // and Host Environment (env-constant) — are added AFTER this truncation
+    // so they survive even when the bootstrap is clipped.
+    if max_system_prompt_chars > 0 && prompt.len() > max_system_prompt_chars {
+        // Truncate on a char boundary, keeping the top portion (identity + safety).
+        let mut end = max_system_prompt_chars;
+        // Ensure we don't split a multi-byte UTF-8 character.
+        while !prompt.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        prompt.truncate(end);
+        prompt.push_str("\n\n[System prompt truncated to fit context budget]\n");
+    }
 
-    // ── 7. Runtime ──────────────────────────────────────────────
-    let host =
-        hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
-    let _ = writeln!(
-        prompt,
-        "## Runtime\n\nHost: {host} | OS: {} | Model: {model_name}\n",
-        std::env::consts::OS,
-    );
-
-    // ── 8. Channel Capabilities (skipped in compact_context mode) ──
+    // ── 7. Channel Capabilities (STORY-011 AC #8: moved after truncation)
+    // Content branches on `autonomy_config.level` and `compact_context`, both
+    // of which are daemon-restart-stable. Placing this block after truncation
+    // keeps it in every request.
     if !compact_context {
         prompt.push_str("## Channel Capabilities\n\n");
         prompt.push_str("- You are running as a messaging bot. Your response is automatically sent back to the user's channel.\n");
@@ -323,17 +324,19 @@ pub fn build_system_prompt_with_mode_and_autonomy(
         prompt.push_str("- NEVER narrate or describe your tool usage. Do NOT say 'Let me fetch...', 'I will use...', 'Searching...', or similar. Give the FINAL ANSWER only — no intermediate steps, no tool mentions, no progress updates.\n\n");
     } // end if !compact_context (Channel Capabilities)
 
-    // ── 9. Truncation (max_system_prompt_chars budget) ──────────
-    if max_system_prompt_chars > 0 && prompt.len() > max_system_prompt_chars {
-        // Truncate on a char boundary, keeping the top portion (identity + safety).
-        let mut end = max_system_prompt_chars;
-        // Ensure we don't split a multi-byte UTF-8 character.
-        while !prompt.is_char_boundary(end) && end > 0 {
-            end -= 1;
-        }
-        prompt.truncate(end);
-        prompt.push_str("\n\n[System prompt truncated to fit context budget]\n");
-    }
+    // ── 8. Host Environment (STORY-011: split from Runtime) ──
+    // Host + OS are env-constant (daemon-restart-stable). Model is mutable
+    // mid-session via `/model` and therefore NOT included here — Phase B
+    // injects it via the user-message preamble so cache bytes don't shift
+    // when the active model changes.
+    let _ = model_name; // unused now that Model: moves to user preamble
+    let host =
+        hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
+    let _ = writeln!(
+        prompt,
+        "## Host Environment\n\nHost: {host} | OS: {}\n",
+        std::env::consts::OS,
+    );
 
     if prompt.is_empty() {
         "You are ZeroClaw, a fast and efficient AI assistant built in Rust. Be helpful, concise, and direct."

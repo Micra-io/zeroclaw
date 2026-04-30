@@ -17,6 +17,7 @@ pub mod system_prompt;
 pub mod thinking;
 pub mod tool_execution;
 pub mod tool_receipts;
+pub mod user_message;
 
 #[cfg(test)]
 mod tests;

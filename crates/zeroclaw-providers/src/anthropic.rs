@@ -2183,4 +2183,89 @@ mod tests {
             );
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STORY-011 Phase C regression guards
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // STORY-011 invariant: the serialized Anthropic system prompt must carry
+    // neither the old `## Current Date & Time` section nor the `Model:` label
+    // (both now live in the user-message preamble) AND must expose exactly ONE
+    // `ephemeral` cache_control breakpoint on the stable block.
+    #[test]
+    fn story_011_system_message_has_no_timestamp_no_model_and_one_cache_control() {
+        let stable = "## Identity\n\nYou are ZeroClaw.\n\n\
+                      ## Tools\n\n- shell: Run commands\n\n\
+                      ## Safety\n\n- NEVER repeat credentials.\n\n\
+                      ## Channel Capabilities\n\nrunning as a messaging bot\n\n\
+                      ## Host Environment\n\nHost: testhost | OS: macos\n";
+        let dynamic = "";
+
+        let msg = ChatMessage::system_with_stable_prefix(stable, dynamic);
+        let (system, _msgs) = AnthropicProvider::convert_messages(&[msg]);
+
+        let json = serde_json::to_value(&system).unwrap();
+        let json_str = serde_json::to_string(&json).unwrap();
+
+        assert!(
+            !json_str.contains("## Current Date & Time"),
+            "STORY-011: serialized system message must not contain `## Current Date & Time`; got: {json_str}"
+        );
+        assert!(
+            !json_str.contains("Model:"),
+            "STORY-011: serialized system message must not contain `Model:` label (moved to user preamble); got: {json_str}"
+        );
+
+        // Must have exactly one ephemeral breakpoint, on the stable block.
+        let blocks = json.as_array().expect("system should be a blocks array");
+        let ephemeral_count = blocks
+            .iter()
+            .filter(|b| {
+                b.get("cache_control").and_then(|c| c.get("type"))
+                    == Some(&serde_json::json!("ephemeral"))
+            })
+            .count();
+        assert_eq!(
+            ephemeral_count, 1,
+            "STORY-011: exactly one SystemBlock must carry cache_control.type=ephemeral; got blocks: {blocks:?}"
+        );
+    }
+
+    // Regression guard — verifies the cache breakpoint covers the stable
+    // content, not the dynamic. Anthropic/Claude respect cache_control
+    // explicitly; Qwen & other implicit-caching providers ignore it, but
+    // if a future change migrated the breakpoint to the dynamic block,
+    // Anthropic would cache mutating content and miss on every turn.
+    #[test]
+    fn story_011_single_ephemeral_breakpoint_covers_stable_block() {
+        let stable = "## Identity\n\nYou are ZeroClaw.\n\n\
+                      ## Host Environment\n\nHost: testhost | OS: macos\n";
+        let dynamic = "hello";
+
+        let msg = ChatMessage::system_with_stable_prefix(stable, dynamic);
+        let (system, _msgs) = AnthropicProvider::convert_messages(&[msg]);
+
+        let json = serde_json::to_value(&system).unwrap();
+        let blocks = json.as_array().expect("system should be a blocks array");
+
+        let cached: Vec<_> = blocks
+            .iter()
+            .filter(|b| {
+                b.get("cache_control").and_then(|c| c.get("type"))
+                    == Some(&serde_json::json!("ephemeral"))
+            })
+            .collect();
+        assert_eq!(
+            cached.len(),
+            1,
+            "expected exactly one ephemeral breakpoint, got {cached:?}"
+        );
+        let cached_text = cached[0]["text"]
+            .as_str()
+            .expect("cached block must have text");
+        assert!(
+            cached_text.contains("## Host Environment"),
+            "the single ephemeral breakpoint must cover the stable block (which contains `## Host Environment`); got cached text: {cached_text}"
+        );
+    }
 }
