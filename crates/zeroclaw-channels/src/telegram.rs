@@ -437,8 +437,10 @@ impl TelegramChannel {
             None
         };
 
-        let mut allowed_chats: Vec<String> =
-            allowed_chats.into_iter().map(|s| s.to_lowercase()).collect();
+        let mut allowed_chats: Vec<String> = allowed_chats
+            .into_iter()
+            .map(|s| s.to_lowercase())
+            .collect();
         allowed_chats.retain(|entry| match entry.as_str() {
             "*" | "dm" | "group" => true,
             id if id.parse::<i64>().is_ok() => true,
@@ -1031,12 +1033,7 @@ impl TelegramChannel {
             "group" => is_group,
             id => id == chat_id,
         });
-        if !allowed
-            && !is_dm
-            && !is_group
-            && chat_type != "channel"
-            && !chat_type.is_empty()
-        {
+        if !allowed && !is_dm && !is_group && chat_type != "channel" && !chat_type.is_empty() {
             tracing::warn!(
                 "Telegram: unknown chat type '{chat_type}' for chat {chat_id} — not matched by any allowed_chats keyword"
             );
@@ -1051,7 +1048,11 @@ impl TelegramChannel {
     /// - username or numeric ID — case-insensitive match
     ///
     /// Non-DM chats (groups, supergroups, channels) always pass.
-    fn is_dm_user_allowed(identities: &[&str], chat_type: &str, allowed_dm_users: &[String]) -> bool {
+    fn is_dm_user_allowed(
+        identities: &[&str],
+        chat_type: &str,
+        allowed_dm_users: &[String],
+    ) -> bool {
         if chat_type != "private" {
             return true;
         }
@@ -3586,11 +3587,13 @@ mod tests {
 
     #[test]
     fn supports_draft_updates_respects_stream_mode() {
-        let off = TelegramChannel::new("fake-token".into(), vec!["*".into()], false, vec![], vec![]);
+        let off =
+            TelegramChannel::new("fake-token".into(), vec!["*".into()], false, vec![], vec![]);
         assert!(!off.supports_draft_updates());
 
-        let partial = TelegramChannel::new("fake-token".into(), vec!["*".into()], false, vec![], vec![])
-            .with_streaming(StreamMode::Partial, 750);
+        let partial =
+            TelegramChannel::new("fake-token".into(), vec!["*".into()], false, vec![], vec![])
+                .with_streaming(StreamMode::Partial, 750);
         assert!(partial.supports_draft_updates());
         assert_eq!(partial.draft_update_interval_ms, 750);
     }
@@ -3690,7 +3693,13 @@ mod tests {
 
     #[test]
     fn telegram_user_allowed_specific() {
-        let ch = TelegramChannel::new("t".into(), vec!["alice".into(), "bob".into()], false, vec![], vec![]);
+        let ch = TelegramChannel::new(
+            "t".into(),
+            vec!["alice".into(), "bob".into()],
+            false,
+            vec![],
+            vec![],
+        );
         assert!(ch.is_user_allowed("alice"));
         assert!(!ch.is_user_allowed("eve"));
     }
@@ -3731,7 +3740,13 @@ mod tests {
 
     #[test]
     fn telegram_wildcard_with_specific_users() {
-        let ch = TelegramChannel::new("t".into(), vec!["alice".into(), "*".into()], false, vec![], vec![]);
+        let ch = TelegramChannel::new(
+            "t".into(),
+            vec!["alice".into(), "*".into()],
+            false,
+            vec![],
+            vec![],
+        );
         assert!(ch.is_user_allowed("alice"));
         assert!(ch.is_user_allowed("bob"));
         assert!(ch.is_user_allowed("anyone"));
@@ -3745,7 +3760,13 @@ mod tests {
 
     #[test]
     fn telegram_user_denied_when_none_of_identities_match() {
-        let ch = TelegramChannel::new("t".into(), vec!["alice".into(), "987654321".into()], false, vec![], vec![]);
+        let ch = TelegramChannel::new(
+            "t".into(),
+            vec!["alice".into(), "987654321".into()],
+            false,
+            vec![],
+            vec![],
+        );
         assert!(!ch.is_any_user_allowed(["unknown", "123456789"]));
     }
 
@@ -4563,7 +4584,8 @@ mod tests {
         let ch = TelegramChannel::new("token".into(), vec!["*".into()], true, vec![], vec![]);
         assert!(ch.mention_only);
 
-        let ch_disabled = TelegramChannel::new("token".into(), vec!["*".into()], false, vec![], vec![]);
+        let ch_disabled =
+            TelegramChannel::new("token".into(), vec!["*".into()], false, vec![], vec![]);
         assert!(!ch_disabled.mention_only);
     }
 
@@ -4850,8 +4872,8 @@ mod tests {
             ..zeroclaw_config::schema::TranscriptionConfig::default()
         };
 
-        let ch =
-            TelegramChannel::new("token".into(), vec!["*".into()], false, vec![], vec![]).with_transcription(tc);
+        let ch = TelegramChannel::new("token".into(), vec!["*".into()], false, vec![], vec![])
+            .with_transcription(tc);
         assert!(ch.transcription.is_some());
         assert!(ch.transcription_manager.is_some());
     }
@@ -4859,8 +4881,8 @@ mod tests {
     #[test]
     fn with_transcription_skips_when_disabled() {
         let tc = zeroclaw_config::schema::TranscriptionConfig::default(); // enabled = false
-        let ch =
-            TelegramChannel::new("token".into(), vec!["*".into()], false, vec![], vec![]).with_transcription(tc);
+        let ch = TelegramChannel::new("token".into(), vec!["*".into()], false, vec![], vec![])
+            .with_transcription(tc);
         assert!(ch.transcription.is_none());
         assert!(ch.transcription_manager.is_none());
     }
@@ -4890,8 +4912,8 @@ mod tests {
             ..Default::default()
         };
 
-        let ch =
-            TelegramChannel::new("token".into(), vec!["*".into()], false, vec![], vec![]).with_transcription(tc);
+        let ch = TelegramChannel::new("token".into(), vec!["*".into()], false, vec![], vec![])
+            .with_transcription(tc);
         let update = serde_json::json!({
             "message": {
                 "message_id": 2,
@@ -5431,15 +5453,15 @@ mod tests {
 
     #[test]
     fn with_ack_reactions_false_disables_reactions() {
-        let ch =
-            TelegramChannel::new("token".into(), vec!["*".into()], false, vec![], vec![]).with_ack_reactions(false);
+        let ch = TelegramChannel::new("token".into(), vec!["*".into()], false, vec![], vec![])
+            .with_ack_reactions(false);
         assert!(!ch.ack_reactions);
     }
 
     #[test]
     fn with_ack_reactions_true_keeps_reactions() {
-        let ch =
-            TelegramChannel::new("token".into(), vec!["*".into()], false, vec![], vec![]).with_ack_reactions(true);
+        let ch = TelegramChannel::new("token".into(), vec!["*".into()], false, vec![], vec![])
+            .with_ack_reactions(true);
         assert!(ch.ack_reactions);
     }
 
@@ -5904,7 +5926,11 @@ mod tests {
     fn is_chat_allowed_empty_allows_all() {
         assert!(TelegramChannel::is_chat_allowed("123", "private", &[]));
         assert!(TelegramChannel::is_chat_allowed("-100999", "group", &[]));
-        assert!(TelegramChannel::is_chat_allowed("-100999", "supergroup", &[]));
+        assert!(TelegramChannel::is_chat_allowed(
+            "-100999",
+            "supergroup",
+            &[]
+        ));
     }
 
     #[test]
@@ -5918,8 +5944,14 @@ mod tests {
     fn is_chat_allowed_dm_keyword() {
         let chats = vec!["dm".to_string()];
         assert!(TelegramChannel::is_chat_allowed("123", "private", &chats));
-        assert!(!TelegramChannel::is_chat_allowed("-100999", "group", &chats));
-        assert!(!TelegramChannel::is_chat_allowed("-100999", "supergroup", &chats));
+        assert!(!TelegramChannel::is_chat_allowed(
+            "-100999", "group", &chats
+        ));
+        assert!(!TelegramChannel::is_chat_allowed(
+            "-100999",
+            "supergroup",
+            &chats
+        ));
     }
 
     #[test]
@@ -5927,14 +5959,26 @@ mod tests {
         let chats = vec!["group".to_string()];
         assert!(!TelegramChannel::is_chat_allowed("123", "private", &chats));
         assert!(TelegramChannel::is_chat_allowed("-100999", "group", &chats));
-        assert!(TelegramChannel::is_chat_allowed("-100999", "supergroup", &chats));
+        assert!(TelegramChannel::is_chat_allowed(
+            "-100999",
+            "supergroup",
+            &chats
+        ));
     }
 
     #[test]
     fn is_chat_allowed_explicit_chat_id() {
         let chats = vec!["-1001234567890".to_string()];
-        assert!(TelegramChannel::is_chat_allowed("-1001234567890", "supergroup", &chats));
-        assert!(!TelegramChannel::is_chat_allowed("-100999", "supergroup", &chats));
+        assert!(TelegramChannel::is_chat_allowed(
+            "-1001234567890",
+            "supergroup",
+            &chats
+        ));
+        assert!(!TelegramChannel::is_chat_allowed(
+            "-100999",
+            "supergroup",
+            &chats
+        ));
         assert!(!TelegramChannel::is_chat_allowed("123", "private", &chats));
     }
 
@@ -5949,13 +5993,21 @@ mod tests {
     #[test]
     fn is_chat_allowed_channel_type_needs_explicit_id_or_star() {
         let keywords_only = vec!["dm".to_string(), "group".to_string()];
-        assert!(!TelegramChannel::is_chat_allowed("-100123", "channel", &keywords_only));
+        assert!(!TelegramChannel::is_chat_allowed(
+            "-100123",
+            "channel",
+            &keywords_only
+        ));
 
         let with_star = vec!["*".to_string()];
-        assert!(TelegramChannel::is_chat_allowed("-100123", "channel", &with_star));
+        assert!(TelegramChannel::is_chat_allowed(
+            "-100123", "channel", &with_star
+        ));
 
         let with_id = vec!["-100123".to_string()];
-        assert!(TelegramChannel::is_chat_allowed("-100123", "channel", &with_id));
+        assert!(TelegramChannel::is_chat_allowed(
+            "-100123", "channel", &with_id
+        ));
     }
 
     #[test]
@@ -5967,59 +6019,131 @@ mod tests {
             .collect();
         assert!(TelegramChannel::is_chat_allowed("123", "private", &chats));
         assert!(TelegramChannel::is_chat_allowed("-100999", "group", &chats));
-        assert!(TelegramChannel::is_chat_allowed("-100999", "supergroup", &chats));
+        assert!(TelegramChannel::is_chat_allowed(
+            "-100999",
+            "supergroup",
+            &chats
+        ));
     }
 
     #[test]
     fn is_dm_user_allowed_empty_allows_all() {
-        assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "private", &[]));
-        assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "group", &[]));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["alice"],
+            "private",
+            &[]
+        ));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["alice"],
+            "group",
+            &[]
+        ));
     }
 
     #[test]
     fn is_dm_user_allowed_star_allows_all_dms() {
         let users = vec!["*".to_string()];
-        assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "private", &users));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["alice"],
+            "private",
+            &users
+        ));
     }
 
     #[test]
     fn is_dm_user_allowed_specific_user() {
         let users = vec!["alice".to_string()];
-        assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "private", &users));
-        assert!(!TelegramChannel::is_dm_user_allowed(&["bob"], "private", &users));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["alice"],
+            "private",
+            &users
+        ));
+        assert!(!TelegramChannel::is_dm_user_allowed(
+            &["bob"],
+            "private",
+            &users
+        ));
     }
 
     #[test]
     fn is_dm_user_allowed_by_numeric_id() {
         let users = vec!["2852312".to_string()];
-        assert!(TelegramChannel::is_dm_user_allowed(&["unknown", "2852312"], "private", &users));
-        assert!(!TelegramChannel::is_dm_user_allowed(&["unknown", "999"], "private", &users));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["unknown", "2852312"],
+            "private",
+            &users
+        ));
+        assert!(!TelegramChannel::is_dm_user_allowed(
+            &["unknown", "999"],
+            "private",
+            &users
+        ));
     }
 
     #[test]
     fn is_dm_user_allowed_non_dm_always_passes() {
         let users = vec!["alice".to_string()];
-        assert!(TelegramChannel::is_dm_user_allowed(&["bob"], "group", &users));
-        assert!(TelegramChannel::is_dm_user_allowed(&["bob"], "supergroup", &users));
-        assert!(TelegramChannel::is_dm_user_allowed(&["bob"], "channel", &users));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["bob"],
+            "group",
+            &users
+        ));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["bob"],
+            "supergroup",
+            &users
+        ));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["bob"],
+            "channel",
+            &users
+        ));
     }
 
     #[test]
     fn is_dm_user_allowed_mixed_users() {
         let users = vec!["alice".to_string(), "2852312".to_string()];
-        assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "private", &users));
-        assert!(TelegramChannel::is_dm_user_allowed(&["unknown", "2852312"], "private", &users));
-        assert!(!TelegramChannel::is_dm_user_allowed(&["bob", "999"], "private", &users));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["alice"],
+            "private",
+            &users
+        ));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["unknown", "2852312"],
+            "private",
+            &users
+        ));
+        assert!(!TelegramChannel::is_dm_user_allowed(
+            &["bob", "999"],
+            "private",
+            &users
+        ));
     }
 
     #[test]
     fn is_dm_user_allowed_case_insensitive() {
         // Constructor lowercases entries, so simulate that
         let users = vec!["alice".to_string()]; // would be "Alice" in config, lowered by constructor
-        assert!(TelegramChannel::is_dm_user_allowed(&["Alice"], "private", &users));
-        assert!(TelegramChannel::is_dm_user_allowed(&["ALICE"], "private", &users));
-        assert!(TelegramChannel::is_dm_user_allowed(&["alice"], "private", &users));
-        assert!(!TelegramChannel::is_dm_user_allowed(&["bob"], "private", &users));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["Alice"],
+            "private",
+            &users
+        ));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["ALICE"],
+            "private",
+            &users
+        ));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["alice"],
+            "private",
+            &users
+        ));
+        assert!(!TelegramChannel::is_dm_user_allowed(
+            &["bob"],
+            "private",
+            &users
+        ));
     }
 
     #[test]
@@ -6040,7 +6164,13 @@ mod tests {
             "t".into(),
             vec!["*".into()],
             false,
-            vec!["group".to_string(), "groups".to_string(), "dm".to_string(), "bogus".to_string(), "-100123".to_string()],
+            vec![
+                "group".to_string(),
+                "groups".to_string(),
+                "dm".to_string(),
+                "bogus".to_string(),
+                "-100123".to_string(),
+            ],
             vec![],
         );
         // "groups" and "bogus" should be dropped; "group", "dm", "-100123" kept
@@ -6054,7 +6184,12 @@ mod tests {
             vec!["*".into()],
             false,
             vec![],
-            vec!["alice".to_string(), "has spaces".to_string(), "*".to_string(), "123".to_string()],
+            vec![
+                "alice".to_string(),
+                "has spaces".to_string(),
+                "*".to_string(),
+                "123".to_string(),
+            ],
         );
         // "has spaces" gets normalized (trim) but still contains a space, dropped
         assert!(ch.allowed_dm_users.contains(&"alice".to_string()));

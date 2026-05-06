@@ -170,7 +170,7 @@ mod tests {
                 namespace: "default".into(),
                 importance: None,
                 superseded_by: None,
-            metadata: None,
+                metadata: None,
             }])
         }
 
@@ -282,7 +282,7 @@ mod tests {
                     namespace: "default".into(),
                     importance: None,
                     superseded_by: None,
-                metadata: None,
+                    metadata: None,
                 },
                 MemoryEntry {
                     id: "2".into(),
@@ -295,7 +295,7 @@ mod tests {
                     namespace: "default".into(),
                     importance: None,
                     superseded_by: None,
-                metadata: None,
+                    metadata: None,
                 },
             ]),
         };
@@ -325,7 +325,7 @@ mod tests {
                     namespace: "default".into(),
                     importance: None,
                     superseded_by: None,
-                metadata: None,
+                    metadata: None,
                 },
                 MemoryEntry {
                     id: "2".into(),
@@ -338,7 +338,7 @@ mod tests {
                     namespace: "default".into(),
                     importance: None,
                     superseded_by: None,
-                metadata: None,
+                    metadata: None,
                 },
             ]),
         };

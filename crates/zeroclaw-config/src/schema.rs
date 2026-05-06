@@ -6898,8 +6898,12 @@ fn default_channel_message_timeout_secs() -> u64 {
     300
 }
 
-fn default_group_context_window_minutes() -> u64 { 15 }
-fn default_group_context_max_messages() -> usize { 30 }
+fn default_group_context_window_minutes() -> u64 {
+    15
+}
+fn default_group_context_max_messages() -> usize {
+    30
+}
 
 fn default_session_backend() -> String {
     "sqlite".into()

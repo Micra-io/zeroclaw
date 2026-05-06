@@ -198,7 +198,7 @@ impl PostgresMemory {
                 .unwrap_or_else(|_| "default".into()),
             importance: row.try_get("importance").ok(),
             superseded_by: None,
-        metadata: None,
+            metadata: None,
         })
     }
 }

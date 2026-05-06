@@ -376,7 +376,7 @@ impl Memory for QdrantMemory {
                     namespace: "default".into(),
                     importance: None,
                     superseded_by: None,
-                metadata: None,
+                    metadata: None,
                 })
             })
             .collect();
@@ -444,7 +444,7 @@ impl Memory for QdrantMemory {
                 namespace: "default".into(),
                 importance: None,
                 superseded_by: None,
-            metadata: None,
+                metadata: None,
             })
         });
 
@@ -525,7 +525,7 @@ impl Memory for QdrantMemory {
                     namespace: "default".into(),
                     importance: None,
                     superseded_by: None,
-                metadata: None,
+                    metadata: None,
                 })
             })
             .collect();

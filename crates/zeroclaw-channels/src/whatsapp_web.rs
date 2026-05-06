@@ -1843,8 +1843,9 @@ fn parse_vcard_fields(vcard: &str) -> Option<(String, Option<String>)> {
             name = Some(value.trim().to_string());
         } else if phone.is_none()
             && let Some(rest) = line.strip_prefix("TEL")
-            && let Some((_params, value)) = rest.split_once(':') {
-                phone = Some(value.trim().to_string());
+            && let Some((_params, value)) = rest.split_once(':')
+        {
+            phone = Some(value.trim().to_string());
         }
     }
     name.map(|n| (n, phone))
@@ -1953,9 +1954,9 @@ mod tests {
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             false,
-            vec![],     // allowed_groups
-            None,       // mention_name
-            None,       // workspace_dir
+            vec![], // allowed_groups
+            None,   // mention_name
+            None,   // workspace_dir
         )
     }
 
@@ -1987,9 +1988,9 @@ mod tests {
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             false,
-            vec![],     // allowed_groups
-            None,       // mention_name
-            None,       // workspace_dir
+            vec![], // allowed_groups
+            None,   // mention_name
+            None,   // workspace_dir
         );
         assert!(ch.is_number_allowed("+1234567890"));
         assert!(ch.is_number_allowed("+9999999999"));
@@ -2008,9 +2009,9 @@ mod tests {
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             false,
-            vec![],     // allowed_groups
-            None,       // mention_name
-            None,       // workspace_dir
+            vec![], // allowed_groups
+            None,   // mention_name
+            None,   // workspace_dir
         );
         // Empty allowlist means "deny all" (matches channel-wide allowlist policy).
         assert!(!ch.is_number_allowed("+1234567890"));
@@ -2369,9 +2370,9 @@ mod tests {
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             false,
-            vec![],     // allowed_groups
-            None,       // mention_name
-            None,       // workspace_dir
+            vec![], // allowed_groups
+            None,   // mention_name
+            None,   // workspace_dir
         );
         assert_eq!(*ch.bot_phone.lock(), Some("919211916069".to_string()));
     }
@@ -2389,9 +2390,9 @@ mod tests {
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             zeroclaw_config::schema::WhatsAppChatPolicy::default(),
             false,
-            vec![],     // allowed_groups
-            None,       // mention_name
-            None,       // workspace_dir
+            vec![], // allowed_groups
+            None,   // mention_name
+            None,   // workspace_dir
         );
         assert_eq!(*ch.bot_phone.lock(), None);
     }
@@ -2472,9 +2473,13 @@ mod tests {
     #[test]
     #[cfg(feature = "whatsapp-web")]
     fn parse_vcard_basic() {
-        let vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Pedro Garcia\nTEL;type=CELL:+34612345678\nEND:VCARD";
+        let vcard =
+            "BEGIN:VCARD\nVERSION:3.0\nFN:Pedro Garcia\nTEL;type=CELL:+34612345678\nEND:VCARD";
         let result = parse_vcard_fields(vcard);
-        assert_eq!(result, Some(("Pedro Garcia".to_string(), Some("+34612345678".to_string()))));
+        assert_eq!(
+            result,
+            Some(("Pedro Garcia".to_string(), Some("+34612345678".to_string())))
+        );
     }
 
     #[test]
@@ -2490,7 +2495,10 @@ mod tests {
     fn parse_vcard_multiple_phones_takes_first() {
         let vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Pedro\nTEL;type=CELL:+34611\nTEL;type=HOME:+34622\nEND:VCARD";
         let result = parse_vcard_fields(vcard);
-        assert_eq!(result, Some(("Pedro".to_string(), Some("+34611".to_string()))));
+        assert_eq!(
+            result,
+            Some(("Pedro".to_string(), Some("+34611".to_string())))
+        );
     }
 
     #[test]

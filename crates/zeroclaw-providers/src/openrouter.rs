@@ -75,7 +75,9 @@ struct CacheControl {
 
 impl CacheControl {
     fn ephemeral() -> Self {
-        Self { cache_type: "ephemeral" }
+        Self {
+            cache_type: "ephemeral",
+        }
     }
 }
 

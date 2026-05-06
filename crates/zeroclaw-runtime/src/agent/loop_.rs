@@ -660,12 +660,14 @@ async fn consume_provider_streaming_response(
             StreamEvent::Usage(usage) => {
                 // Merge streaming usage events (input from message_start,
                 // output from message_delta) into the accumulated usage.
-                let u = outcome.usage.get_or_insert(zeroclaw_providers::traits::TokenUsage {
-                    input_tokens: None,
-                    output_tokens: None,
-                    cached_input_tokens: None,
-                    ..Default::default()
-                });
+                let u = outcome
+                    .usage
+                    .get_or_insert(zeroclaw_providers::traits::TokenUsage {
+                        input_tokens: None,
+                        output_tokens: None,
+                        cached_input_tokens: None,
+                        ..Default::default()
+                    });
                 if let Some(input) = usage.input_tokens {
                     u.input_tokens = Some(input);
                 }
@@ -1363,9 +1365,8 @@ pub async fn run_tool_call_loop(
                 // calls) into the observer event so OTel exporters can emit
                 // gen_ai.output.messages and the tool call breakdown.
                 let resp_output_text = resp.text.clone();
-                let resp_output_tool_calls: Vec<
-                    crate::observability::traits::ToolCallSnapshot,
-                > = resp.tool_calls.iter().map(Into::into).collect();
+                let resp_output_tool_calls: Vec<crate::observability::traits::ToolCallSnapshot> =
+                    resp.tool_calls.iter().map(Into::into).collect();
 
                 observer.record_event(&ObserverEvent::LlmResponse {
                     provider: provider_name.to_string(),
@@ -3217,11 +3218,7 @@ pub async fn run(
                             error = %e,
                             "Context compression failed, falling back to history trim"
                         );
-                        trim_history(
-                            &mut history,
-                            config.agent.max_history_messages / 2,
-                            false,
-                        );
+                        trim_history(&mut history, config.agent.max_history_messages / 2, false);
                     }
                 }
             }

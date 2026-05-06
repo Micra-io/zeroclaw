@@ -151,7 +151,7 @@ mod tests {
                 namespace: "default".into(),
                 importance: Some(0.7),
                 superseded_by: None,
-            metadata: None,
+                metadata: None,
             },
             MemoryEntry {
                 id: "2".into(),
@@ -164,7 +164,7 @@ mod tests {
                 namespace: "default".into(),
                 importance: Some(0.3),
                 superseded_by: None,
-            metadata: None,
+                metadata: None,
             },
         ];
 

@@ -123,7 +123,10 @@ struct ChannelNotifyObserver {
 
 impl Observer for ChannelNotifyObserver {
     fn record_event(&self, event: &ObserverEvent) {
-        if let ObserverEvent::ToolCallStart { tool, arguments, .. } = event {
+        if let ObserverEvent::ToolCallStart {
+            tool, arguments, ..
+        } = event
+        {
             self.tools_used.store(true, Ordering::Relaxed);
             let detail = match arguments {
                 Some(args) if !args.is_empty() => {
@@ -2952,14 +2955,10 @@ async fn process_channel_message(
     if msg.reply_target.ends_with("@g.us") {
         let window = ctx.prompt_config.channels.group_context_window_minutes;
         let max_msgs = ctx.prompt_config.channels.group_context_max_messages;
-        if window > 0 && let Some(ref obs) = ctx.observe_store {
-            let group_context = load_group_context(
-                obs,
-                &msg.reply_target,
-                window,
-                max_msgs,
-                2000,
-            );
+        if window > 0
+            && let Some(ref obs) = ctx.observe_store
+        {
+            let group_context = load_group_context(obs, &msg.reply_target, window, max_msgs, 2000);
             if !group_context.is_empty() {
                 tracing::info!(
                     channel = %msg.channel,
@@ -8459,7 +8458,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 namespace: "default".into(),
                 importance: None,
                 superseded_by: None,
-            metadata: None,
+                metadata: None,
             }])
         }
 
@@ -9455,8 +9454,14 @@ BTC is currently around $65,000 based on latest tool output."#
     fn story_011_stable_prompt_byte_identical_across_models() {
         let ws = make_workspace();
         let prompt_qwen = build_system_prompt(ws.path(), "qwen/qwen3.6-plus", &[], &[], None, None);
-        let prompt_claude =
-            build_system_prompt(ws.path(), "anthropic/claude-sonnet-4.6", &[], &[], None, None);
+        let prompt_claude = build_system_prompt(
+            ws.path(),
+            "anthropic/claude-sonnet-4.6",
+            &[],
+            &[],
+            None,
+            None,
+        );
         assert_eq!(
             prompt_qwen, prompt_claude,
             "stable prefix must survive /model mid-session; differing bytes would invalidate the cache"
@@ -12508,9 +12513,13 @@ This is an example JSON object for profile settings."#;
             let recent = now - chrono::Duration::minutes(5);
             {
                 let conn = store.conn.lock();
-                for (i, msg) in ["[+111] Hello everyone", "[+222] Anyone know a plumber?", "[+333] Try Pedro"]
-                    .iter()
-                    .enumerate()
+                for (i, msg) in [
+                    "[+111] Hello everyone",
+                    "[+222] Anyone know a plumber?",
+                    "[+333] Try Pedro",
+                ]
+                .iter()
+                .enumerate()
                 {
                     let ts = (recent + chrono::Duration::seconds(i as i64 * 60)).to_rfc3339();
                     conn.execute(
@@ -12521,7 +12530,10 @@ This is an example JSON object for profile settings."#;
             }
 
             let result = load_group_context(store.as_ref(), "group123@g.us", 15, 30, 2000);
-            assert!(result.contains("Recent Group Conversation"), "got: {result}");
+            assert!(
+                result.contains("Recent Group Conversation"),
+                "got: {result}"
+            );
             // Timestamps should be prepended as [HH:MM]
             let expected_time = recent.format("%H:%M").to_string();
             assert!(
@@ -12854,5 +12866,4 @@ This is an example JSON object for profile settings."#;
             calls[0][0].1
         );
     }
-
 }
