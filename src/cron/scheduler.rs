@@ -639,40 +639,47 @@ pub(crate) async fn deliver_announcement(
             }
         }
         "whatsapp" | "whatsapp-web" | "whatsapp_web" => {
-            if let Some(_live) = crate::channels::get_live_channel("whatsapp_web")
-                .or_else(|| crate::channels::get_live_channel("whatsapp"))
+            #[cfg(feature = "whatsapp-web")]
             {
-                let wa = config
-                    .channels_config
-                    .whatsapp
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("whatsapp channel not configured"))?;
-                if !wa.is_web_config() {
+                if let Some(_live) = crate::channels::get_live_channel("whatsapp_web")
+                    .or_else(|| crate::channels::get_live_channel("whatsapp"))
+                {
+                    let wa = config
+                        .channels_config
+                        .whatsapp
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("whatsapp channel not configured"))?;
+                    if !wa.is_web_config() {
+                        anyhow::bail!(
+                            "whatsapp cron delivery requires Web mode (session_path must be set)"
+                        );
+                    }
+                    let channel = WhatsAppWebChannel::new(
+                        wa.session_path.clone().unwrap_or_default(),
+                        wa.pair_phone.clone(),
+                        wa.pair_code.clone(),
+                        wa.allowed_numbers.clone(),
+                        wa.mention_only,
+                        wa.mode.clone(),
+                        wa.dm_policy.clone(),
+                        wa.group_policy.clone(),
+                        wa.self_chat_mode,
+                        wa.allowed_groups.clone(),
+                        wa.mention_name.clone(),
+                        None, // workspace_dir not needed for cron delivery
+                    );
+                    channel
+                        .send(&SendMessage::new(safe_output.as_str(), target))
+                        .await?;
+                } else {
                     anyhow::bail!(
-                        "whatsapp cron delivery requires Web mode (session_path must be set)"
+                        "whatsapp delivery requires a running daemon with an active WhatsApp channel"
                     );
                 }
-                let channel = WhatsAppWebChannel::new(
-                    wa.session_path.clone().unwrap_or_default(),
-                    wa.pair_phone.clone(),
-                    wa.pair_code.clone(),
-                    wa.allowed_numbers.clone(),
-                    wa.mention_only,
-                    wa.mode.clone(),
-                    wa.dm_policy.clone(),
-                    wa.group_policy.clone(),
-                    wa.self_chat_mode,
-                    wa.allowed_groups.clone(),
-                    wa.mention_name.clone(),
-                    None, // workspace_dir not needed for cron delivery
-                );
-                channel
-                    .send(&SendMessage::new(safe_output.as_str(), target))
-                    .await?;
-            } else {
-                anyhow::bail!(
-                    "whatsapp delivery requires a running daemon with an active WhatsApp channel"
-                );
+            }
+            #[cfg(not(feature = "whatsapp-web"))]
+            {
+                anyhow::bail!("whatsapp delivery channel requires `whatsapp-web` feature");
             }
         }
         "qq" => {

@@ -98,7 +98,13 @@ impl GitOperationsTool {
         args: &[&str],
         working_dir: &std::path::Path,
     ) -> anyhow::Result<String> {
+        // Defense: this tool operates on caller-specified paths, so we must not
+        // honor an inherited GIT_DIR / GIT_WORK_TREE that would silently redirect
+        // git to a different repo. Pre-push test runs surface this when the hook
+        // env leaks GIT_DIR into spawned children.
         let output = tokio::process::Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .args(args)
             .current_dir(working_dir)
             .output()
@@ -790,6 +796,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         // Initialize a git repository
         std::process::Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .args(["init"])
             .current_dir(tmp.path())
             .output()
@@ -821,6 +829,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         // Initialize a git repository so the command can succeed
         std::process::Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .args(["init"])
             .current_dir(tmp.path())
             .output()
@@ -886,6 +896,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         // Initialize a git repository
         std::process::Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .args(["init"])
             .current_dir(tmp.path())
             .output()
@@ -961,16 +973,22 @@ mod tests {
         let sub = tmp.path().join("nested");
         std::fs::create_dir(&sub).unwrap();
         std::process::Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .args(["init"])
             .current_dir(&sub)
             .output()
             .unwrap();
         std::process::Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(&sub)
             .output()
             .unwrap();
         std::process::Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .args(["config", "user.name", "Test"])
             .current_dir(&sub)
             .output()
