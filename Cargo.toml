@@ -359,13 +359,13 @@ harness = false
 # Tracks: docs/plans/2026-05-06-001-wa-rs-rebrand-plan.md
 # Refs: zeroclaw-labs/zeroclaw#6246, Micra-io/zeroclaw#50
 [patch.crates-io]
-wa-rs                 = { git = "https://github.com/Micra-io/whatsapp-rust.git", branch = "wa-rs-rebrand-2026-05" }
-wa-rs-core            = { git = "https://github.com/Micra-io/whatsapp-rust.git", branch = "wa-rs-rebrand-2026-05" }
-wa-rs-binary          = { git = "https://github.com/Micra-io/whatsapp-rust.git", branch = "wa-rs-rebrand-2026-05" }
-wa-rs-derive          = { git = "https://github.com/Micra-io/whatsapp-rust.git", branch = "wa-rs-rebrand-2026-05" }
-wa-rs-libsignal       = { git = "https://github.com/Micra-io/whatsapp-rust.git", branch = "wa-rs-rebrand-2026-05" }
-wa-rs-noise           = { git = "https://github.com/Micra-io/whatsapp-rust.git", branch = "wa-rs-rebrand-2026-05" }
-wa-rs-appstate        = { git = "https://github.com/Micra-io/whatsapp-rust.git", branch = "wa-rs-rebrand-2026-05" }
-wa-rs-proto           = { git = "https://github.com/Micra-io/whatsapp-rust.git", branch = "wa-rs-rebrand-2026-05" }
-wa-rs-tokio-transport = { git = "https://github.com/Micra-io/whatsapp-rust.git", branch = "wa-rs-rebrand-2026-05" }
-wa-rs-ureq-http       = { git = "https://github.com/Micra-io/whatsapp-rust.git", branch = "wa-rs-rebrand-2026-05" }
+wa-rs                 = { git = "https://github.com/Micra-io/whatsapp-rust.git", rev = "46322bdccd2f91751215a6bbe93c7331b19e84ec" }
+wa-rs-core            = { git = "https://github.com/Micra-io/whatsapp-rust.git", rev = "46322bdccd2f91751215a6bbe93c7331b19e84ec" }
+wa-rs-binary          = { git = "https://github.com/Micra-io/whatsapp-rust.git", rev = "46322bdccd2f91751215a6bbe93c7331b19e84ec" }
+wa-rs-derive          = { git = "https://github.com/Micra-io/whatsapp-rust.git", rev = "46322bdccd2f91751215a6bbe93c7331b19e84ec" }
+wa-rs-libsignal       = { git = "https://github.com/Micra-io/whatsapp-rust.git", rev = "46322bdccd2f91751215a6bbe93c7331b19e84ec" }
+wa-rs-noise           = { git = "https://github.com/Micra-io/whatsapp-rust.git", rev = "46322bdccd2f91751215a6bbe93c7331b19e84ec" }
+wa-rs-appstate        = { git = "https://github.com/Micra-io/whatsapp-rust.git", rev = "46322bdccd2f91751215a6bbe93c7331b19e84ec" }
+wa-rs-proto           = { git = "https://github.com/Micra-io/whatsapp-rust.git", rev = "46322bdccd2f91751215a6bbe93c7331b19e84ec" }
+wa-rs-tokio-transport = { git = "https://github.com/Micra-io/whatsapp-rust.git", rev = "46322bdccd2f91751215a6bbe93c7331b19e84ec" }
+wa-rs-ureq-http       = { git = "https://github.com/Micra-io/whatsapp-rust.git", rev = "46322bdccd2f91751215a6bbe93c7331b19e84ec" }

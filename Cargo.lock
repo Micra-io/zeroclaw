@@ -10953,7 +10953,7 @@ dependencies = [
 [[package]]
 name = "wa-rs"
 version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?branch=wa-rs-rebrand-2026-05#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -10984,7 +10984,7 @@ dependencies = [
 [[package]]
 name = "wa-rs-appstate"
 version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?branch=wa-rs-rebrand-2026-05#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -11005,7 +11005,7 @@ dependencies = [
 [[package]]
 name = "wa-rs-binary"
 version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?branch=wa-rs-rebrand-2026-05#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
 dependencies = [
  "bytes",
  "compact_str",
@@ -11021,7 +11021,7 @@ dependencies = [
 [[package]]
 name = "wa-rs-core"
 version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?branch=wa-rs-rebrand-2026-05#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
 dependencies = [
  "aes 0.9.0",
  "anyhow",
@@ -11062,7 +11062,7 @@ dependencies = [
 [[package]]
 name = "wa-rs-derive"
 version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?branch=wa-rs-rebrand-2026-05#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -11072,7 +11072,7 @@ dependencies = [
 [[package]]
 name = "wa-rs-libsignal"
 version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?branch=wa-rs-rebrand-2026-05#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
 dependencies = [
  "aes 0.9.0",
  "arrayref",
@@ -11104,7 +11104,7 @@ dependencies = [
 [[package]]
 name = "wa-rs-noise"
 version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?branch=wa-rs-rebrand-2026-05#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
 dependencies = [
  "anyhow",
  "bytes",
@@ -11122,7 +11122,7 @@ dependencies = [
 [[package]]
 name = "wa-rs-proto"
 version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?branch=wa-rs-rebrand-2026-05#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
 dependencies = [
  "prost 0.14.3",
  "serde",
@@ -11131,7 +11131,7 @@ dependencies = [
 [[package]]
 name = "wa-rs-tokio-transport"
 version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?branch=wa-rs-rebrand-2026-05#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -11151,7 +11151,7 @@ dependencies = [
 [[package]]
 name = "wa-rs-ureq-http"
 version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?branch=wa-rs-rebrand-2026-05#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
 dependencies = [
  "anyhow",
  "async-trait",
