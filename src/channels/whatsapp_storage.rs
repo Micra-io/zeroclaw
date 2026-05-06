@@ -66,15 +66,17 @@ macro_rules! to_store_err {
     // For expressions returning Result<usize, E>
     (execute: $expr:expr) => {
         $expr.map(|_| ()).map_err(|e| {
-            wa_rs_core::store::error::StoreError::Database(Box::new(e)
-                as Box<dyn std::error::Error + Send + Sync>)
+            wa_rs_core::store::error::StoreError::Database(
+                Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+            )
         })
     };
     // For other expressions
     ($expr:expr) => {
         $expr.map_err(|e| {
-            wa_rs_core::store::error::StoreError::Database(Box::new(e)
-                as Box<dyn std::error::Error + Send + Sync>)
+            wa_rs_core::store::error::StoreError::Database(
+                Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+            )
         })
     };
 }
@@ -364,9 +366,7 @@ impl SignalStore for RusqliteStore {
                 Ok(Some(arr))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -380,10 +380,7 @@ impl SignalStore for RusqliteStore {
 
     // --- Session Operations ---
 
-    async fn get_session(
-        &self,
-        address: &str,
-    ) -> wa_rs_core::store::error::Result<Option<Bytes>> {
+    async fn get_session(&self, address: &str) -> wa_rs_core::store::error::Result<Option<Bytes>> {
         let conn = self.conn.lock();
         let result = conn.query_row(
             "SELECT record FROM sessions WHERE address = ?1 AND device_id = ?2",
@@ -394,9 +391,7 @@ impl SignalStore for RusqliteStore {
         match result {
             Ok(record) => Ok(Some(Bytes::from(record))),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -448,9 +443,7 @@ impl SignalStore for RusqliteStore {
         match result {
             Ok(key) => Ok(Some(Bytes::from(key))),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -471,9 +464,7 @@ impl SignalStore for RusqliteStore {
             // is unreachable here, so we don't match it.
             Ok(Some(id)) => Ok(u32::try_from(id).unwrap_or(0)),
             Ok(None) => Ok(0),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -514,9 +505,7 @@ impl SignalStore for RusqliteStore {
         match result {
             Ok(record) => Ok(Some(record)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -577,9 +566,7 @@ impl SignalStore for RusqliteStore {
         match result {
             Ok(record) => Ok(Some(record)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -613,9 +600,7 @@ impl AppSyncStore for RusqliteStore {
         match result {
             Ok(key) => Ok(Some(key)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -701,9 +686,7 @@ impl AppSyncStore for RusqliteStore {
         match result {
             Ok(mac) => Ok(Some(mac)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -745,9 +728,7 @@ impl AppSyncStore for RusqliteStore {
         match result {
             Ok(key_id) => Ok(Some(key_id)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 }
@@ -880,9 +861,7 @@ impl ProtocolStore for RusqliteStore {
         match result {
             Ok(entry) => Ok(Some(entry)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -910,9 +889,7 @@ impl ProtocolStore for RusqliteStore {
         match result {
             Ok(entry) => Ok(Some(entry)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -1001,9 +978,7 @@ impl ProtocolStore for RusqliteStore {
         match result {
             Ok(same) => Ok(same),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -1086,9 +1061,7 @@ impl ProtocolStore for RusqliteStore {
         match result {
             Ok(record) => Ok(Some(record)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -1132,9 +1105,7 @@ impl ProtocolStore for RusqliteStore {
         match result {
             Ok(entry) => Ok(Some(entry)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 
@@ -1258,9 +1229,7 @@ impl ProtocolStore for RusqliteStore {
             Ok(p) => Some(p),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
             Err(e) => {
-                return Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                    e,
-                )));
+                return Err(wa_rs_core::store::error::StoreError::Database(Box::new(e)));
             }
         };
 
@@ -1461,9 +1430,7 @@ impl DeviceStoreTrait for RusqliteStore {
         match result {
             Ok(device) => Ok(Some(device)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
-                e,
-            ))),
+            Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(e))),
         }
     }
 

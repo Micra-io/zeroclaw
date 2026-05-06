@@ -725,7 +725,11 @@ impl WhatsAppWebChannel {
         // wa-rs 0.5: upload() takes a third UploadOptions arg; default reuses
         // the legacy behavior (fresh media key generated server-side).
         let upload = client
-            .upload(file_bytes, media_type, wa_rs::upload::UploadOptions::default())
+            .upload(
+                file_bytes,
+                media_type,
+                wa_rs::upload::UploadOptions::default(),
+            )
             .await
             .map_err(|e| anyhow!("WhatsApp upload failed for {target}: {e}"))?;
 
