@@ -1474,7 +1474,9 @@ impl DeviceStoreTrait for RusqliteStore {
 mod tests {
     use super::*;
     #[cfg(feature = "whatsapp-web")]
-    use wa_rs_core::store::traits::{LidPnMappingEntry, ProtocolStore, TcTokenEntry};
+    use wa_rs_core::store::traits::{
+        DeviceInfo, DeviceListRecord, LidPnMappingEntry, ProtocolStore, TcTokenEntry,
+    };
 
     #[cfg(feature = "whatsapp-web")]
     #[test]
@@ -1556,5 +1558,160 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[cfg(feature = "whatsapp-web")]
+    #[tokio::test]
+    async fn take_sent_message_atomicity() {
+        // Validates the atomic SELECT+DELETE under Immediate transaction in
+        // `take_sent_message`: the payload must be returned exactly once and
+        // a second take on the same key must yield None. Guards against
+        // silent duplication or loss of retry-receipt payloads.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = RusqliteStore::new(tmp.path()).unwrap();
+
+        let chat_jid = "120363407513744860@g.us";
+        let message_id = "3EB0AABBCCDDEEFF11223344";
+        let payload: Vec<u8> = vec![0x0a, 0x05, b'h', b'e', b'l', b'l', b'o', 0xff, 0x00];
+
+        ProtocolStore::store_sent_message(&store, chat_jid, message_id, &payload)
+            .await
+            .unwrap();
+
+        // First take returns the payload bytes verbatim.
+        let first = ProtocolStore::take_sent_message(&store, chat_jid, message_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.as_deref(),
+            Some(payload.as_slice()),
+            "first take must return the stored payload exactly"
+        );
+
+        // Second take with the same key must return None — the row was
+        // consumed by the prior take's atomic SELECT+DELETE.
+        let second = ProtocolStore::take_sent_message(&store, chat_jid, message_id)
+            .await
+            .unwrap();
+        assert!(
+            second.is_none(),
+            "second take on same key must return None (row already consumed)"
+        );
+
+        // Different message_id under same chat_jid must not be affected.
+        let other_id = "3EB0FFFFFFFFFFFF99887766";
+        let other_payload: Vec<u8> = vec![1, 2, 3];
+        ProtocolStore::store_sent_message(&store, chat_jid, other_id, &other_payload)
+            .await
+            .unwrap();
+        // Taking the original key still yields None.
+        assert!(
+            ProtocolStore::take_sent_message(&store, chat_jid, message_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // The unrelated key is unaffected and still takeable once.
+        assert_eq!(
+            ProtocolStore::take_sent_message(&store, chat_jid, other_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(other_payload.as_slice())
+        );
+    }
+
+    #[cfg(feature = "whatsapp-web")]
+    #[tokio::test]
+    async fn device_list_record_raw_id_round_trip() {
+        // Validates that DeviceListRecord.raw_id (Option<u32>) survives the
+        // i64 conversion in update_device_list / get_devices. Per bf841ec6,
+        // raw_id drives ADV identity-change detection — a wrong cast would
+        // falsely invalidate live sessions.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = RusqliteStore::new(tmp.path()).unwrap();
+
+        // Case 1: Some(7u32) round-trips to Some(7u32).
+        let user_a = "15550001111";
+        let record_a = DeviceListRecord {
+            user: user_a.to_string(),
+            devices: vec![DeviceInfo {
+                device_id: 0,
+                key_index: Some(1),
+            }],
+            timestamp: 1_700_000_000,
+            phash: Some("phash-a".to_string()),
+            raw_id: Some(7u32),
+        };
+        ProtocolStore::update_device_list(&store, record_a.clone())
+            .await
+            .unwrap();
+        let loaded_a = ProtocolStore::get_devices(&store, user_a)
+            .await
+            .unwrap()
+            .expect("expected device list for user_a");
+        assert_eq!(loaded_a.raw_id, Some(7u32));
+        assert_eq!(loaded_a.user, user_a);
+        assert_eq!(loaded_a.timestamp, 1_700_000_000);
+        assert_eq!(loaded_a.phash.as_deref(), Some("phash-a"));
+
+        // Case 2: None round-trips to None (separate user record).
+        let user_b = "15550002222";
+        let record_b = DeviceListRecord {
+            user: user_b.to_string(),
+            devices: vec![DeviceInfo {
+                device_id: 0,
+                key_index: None,
+            }],
+            timestamp: 1_700_000_500,
+            phash: None,
+            raw_id: None,
+        };
+        ProtocolStore::update_device_list(&store, record_b)
+            .await
+            .unwrap();
+        let loaded_b = ProtocolStore::get_devices(&store, user_b)
+            .await
+            .unwrap()
+            .expect("expected device list for user_b");
+        assert_eq!(loaded_b.raw_id, None);
+        assert_eq!(loaded_b.phash, None);
+
+        // Case 3: u32::MAX round-trips intact (confirms the i64 cast does
+        // not truncate at the high end of the u32 range).
+        let user_c = "15550003333";
+        let record_c = DeviceListRecord {
+            user: user_c.to_string(),
+            devices: vec![],
+            timestamp: 1_700_001_000,
+            phash: None,
+            raw_id: Some(u32::MAX),
+        };
+        ProtocolStore::update_device_list(&store, record_c)
+            .await
+            .unwrap();
+        let loaded_c = ProtocolStore::get_devices(&store, user_c)
+            .await
+            .unwrap()
+            .expect("expected device list for user_c");
+        assert_eq!(loaded_c.raw_id, Some(u32::MAX));
+
+        // Case 4: an UPDATE that changes raw_id from Some -> None for the
+        // same user must clear the stored value (INSERT OR REPLACE path).
+        let record_a_cleared = DeviceListRecord {
+            user: user_a.to_string(),
+            devices: record_a.devices.clone(),
+            timestamp: record_a.timestamp + 1,
+            phash: record_a.phash.clone(),
+            raw_id: None,
+        };
+        ProtocolStore::update_device_list(&store, record_a_cleared)
+            .await
+            .unwrap();
+        let reloaded_a = ProtocolStore::get_devices(&store, user_a)
+            .await
+            .unwrap()
+            .expect("expected updated device list for user_a");
+        assert_eq!(reloaded_a.raw_id, None);
     }
 }
