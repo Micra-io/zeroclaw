@@ -466,10 +466,11 @@ impl SignalStore for RusqliteStore {
         );
 
         match result {
-            // MAX returns NULL on empty table → Some(None); on non-empty → Some(Some(n))
+            // MAX(...) over an aggregate always returns one row: NULL on empty table
+            // (→ Some(None)), or Some(Some(n)) when rows exist. QueryReturnedNoRows
+            // is unreachable here, so we don't match it.
             Ok(Some(id)) => Ok(u32::try_from(id).unwrap_or(0)),
             Ok(None) => Ok(0),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
             Err(e) => Err(wa_rs_core::store::error::StoreError::Database(Box::new(
                 e,
             ))),
@@ -1041,7 +1042,7 @@ impl ProtocolStore for RusqliteStore {
                 devices_json,
                 record.timestamp,
                 record.phash,
-                record.raw_id.map(|r| r as i64),
+                record.raw_id.map(i64::from),
                 self.device_id,
                 now,
             ],
@@ -1069,12 +1070,15 @@ impl ProtocolStore for RusqliteStore {
                 let devices: Vec<DeviceInfo> =
                     serde_json::from_str(&devices_json).map_err(to_rusqlite_err)?;
                 let raw_id: Option<i64> = row.get(4)?;
+                // Out-of-range DB values degrade to None rather than truncating
+                // silently — `raw_id` drives ADV identity-change detection, so a
+                // wrong value would falsely invalidate live sessions.
                 Ok(DeviceListRecord {
                     user: row.get(0)?,
                     devices,
                     timestamp: row.get(2)?,
                     phash: row.get(3)?,
-                    raw_id: raw_id.map(|r| r as u32),
+                    raw_id: raw_id.and_then(|r| u32::try_from(r).ok()),
                 })
             },
         );
@@ -1241,7 +1245,9 @@ impl ProtocolStore for RusqliteStore {
         // Atomic SELECT+DELETE under an immediate transaction matches upstream's
         // SqliteStore::take_sent_message: prevents two concurrent retry-receipts
         // from each consuming and re-encrypting the same payload.
-        let tx = to_store_err!(conn.transaction())?;
+        let tx = to_store_err!(
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        )?;
 
         let payload: Option<Vec<u8>> = match tx.query_row(
             "SELECT payload FROM sent_messages
