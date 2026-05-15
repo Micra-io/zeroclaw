@@ -196,7 +196,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -207,7 +207,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2486,7 +2486,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2800,7 +2800,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5993,7 +5993,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6078,7 +6078,7 @@ dependencies = [
  "once_cell",
  "rustix 1.1.4",
  "slab",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6087,7 +6087,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "getrandom 0.2.17",
  "http 1.4.0",
@@ -6486,7 +6486,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7309,7 +7309,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -7322,7 +7322,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -8280,7 +8280,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9111,7 +9111,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9752,7 +9752,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10583,7 +10583,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10952,8 +10952,8 @@ dependencies = [
 
 [[package]]
 name = "wa-rs"
-version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+version = "0.6.0"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23#8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -10983,8 +10983,8 @@ dependencies = [
 
 [[package]]
 name = "wa-rs-appstate"
-version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+version = "0.6.0"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23#8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -11004,8 +11004,8 @@ dependencies = [
 
 [[package]]
 name = "wa-rs-binary"
-version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+version = "0.6.0"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23#8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23"
 dependencies = [
  "bytes",
  "compact_str",
@@ -11020,8 +11020,8 @@ dependencies = [
 
 [[package]]
 name = "wa-rs-core"
-version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+version = "0.6.0"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23#8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23"
 dependencies = [
  "aes 0.9.0",
  "anyhow",
@@ -11049,8 +11049,10 @@ dependencies = [
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
+ "subtle",
  "thiserror 2.0.18",
  "typed-builder",
+ "uuid",
  "wa-rs-appstate",
  "wa-rs-binary",
  "wa-rs-derive",
@@ -11061,8 +11063,8 @@ dependencies = [
 
 [[package]]
 name = "wa-rs-derive"
-version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+version = "0.6.0"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23#8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -11071,8 +11073,8 @@ dependencies = [
 
 [[package]]
 name = "wa-rs-libsignal"
-version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+version = "0.6.0"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23#8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23"
 dependencies = [
  "aes 0.9.0",
  "arrayref",
@@ -11103,8 +11105,8 @@ dependencies = [
 
 [[package]]
 name = "wa-rs-noise"
-version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+version = "0.6.0"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23#8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23"
 dependencies = [
  "anyhow",
  "bytes",
@@ -11121,8 +11123,8 @@ dependencies = [
 
 [[package]]
 name = "wa-rs-proto"
-version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+version = "0.6.0"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23#8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23"
 dependencies = [
  "prost 0.14.3",
  "serde",
@@ -11130,8 +11132,8 @@ dependencies = [
 
 [[package]]
 name = "wa-rs-tokio-transport"
-version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+version = "0.6.0"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23#8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -11150,8 +11152,8 @@ dependencies = [
 
 [[package]]
 name = "wa-rs-ureq-http"
-version = "0.5.0"
-source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=46322bdccd2f91751215a6bbe93c7331b19e84ec#46322bdccd2f91751215a6bbe93c7331b19e84ec"
+version = "0.6.0"
+source = "git+https://github.com/Micra-io/whatsapp-rust.git?rev=8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23#8b6d64f8b7e65d5ab1336bbe8fb2fbeaa7610f23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12054,7 +12056,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
