@@ -316,8 +316,16 @@ pub fn append_or_merge_system_message(history: &mut Vec<ChatMessage>, content: i
 
 /// Trim conversation history to prevent unbounded growth.
 /// Preserves the system prompt (first message if role=system) and the most recent messages.
-pub fn trim_history(history: &mut Vec<ChatMessage>, max_history: usize) {
-    // Nothing to trim if within limit
+///
+/// When `chunked` is true, the trim only fires once the non-system message
+/// count exceeds `2 * max_history`, then drains back down to `max_history`
+/// in a single batch. This keeps the conversation prefix byte-stable for
+/// `max_history` turns at a time, so the Anthropic message-level cache
+/// breakpoint (`apply_cache_to_last_message`) stays valid across turns
+/// instead of being invalidated on every front drop. When `chunked` is
+/// false, the original per-turn behaviour is preserved: drop as soon as the
+/// count exceeds `max_history`.
+pub fn trim_history(history: &mut Vec<ChatMessage>, max_history: usize, chunked: bool) {
     let has_system = history.first().is_some_and(|m| m.role == "system");
     let non_system_count = if has_system {
         history.len() - 1
@@ -325,7 +333,15 @@ pub fn trim_history(history: &mut Vec<ChatMessage>, max_history: usize) {
         history.len()
     };
 
-    if non_system_count <= max_history {
+    // In chunked mode, hold off until the buffer has grown to 2*max, then
+    // drain back to max in one batch so the cached prefix stays stable for
+    // the next `max` turns. In legacy mode, trim the moment we exceed `max`.
+    let threshold = if chunked {
+        max_history.saturating_mul(2)
+    } else {
+        max_history
+    };
+    if non_system_count <= threshold {
         return;
     }
 

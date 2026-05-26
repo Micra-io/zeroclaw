@@ -972,7 +972,26 @@ impl Agent {
 
     fn trim_history(&mut self) {
         let max = self.config.max_history_messages;
-        if self.history.len() <= max {
+        // Chunked mode (default true): only fire when the buffer has grown to
+        // `2 * max`, then drain back to `max` in a single batch so the
+        // conversation prefix stays byte-stable for the next `max` turns,
+        // preserving the Anthropic message-level cache breakpoint. Legacy mode
+        // fires as soon as we exceed `max`, which thrashes the cache.
+        let threshold = if self.config.history_trim_chunked {
+            max.saturating_mul(2)
+        } else {
+            max
+        };
+        // NOTE: this gate intentionally compares TOTAL `self.history.len()`
+        // (system message included), whereas the free `history::trim_history`
+        // gates on the *non-system* count. With a system message present this
+        // method therefore fires one message earlier than the free fn. Both
+        // behaviours are pre-existing and intentional — the legacy path here
+        // must match the original upstream guard (`self.history.len() <= max`)
+        // exactly, so the chunked threshold just doubles the same total-length
+        // comparison. Do not "reconcile" the two; they are not meant to be
+        // byte-for-byte equivalent.
+        if self.history.len() <= threshold {
             return;
         }
 
@@ -3820,6 +3839,10 @@ mod tests {
         // TR1 left as an orphan unless the trim guards against it.
         let agent_config = zeroclaw_config::schema::AliasedAgentConfig {
             max_history_messages: 4,
+            // Legacy per-turn trim so the trim fires at this small message
+            // count and the orphan-guard path is exercised. Chunked mode
+            // (default) only trims at 2*max.
+            history_trim_chunked: false,
             ..zeroclaw_config::schema::AliasedAgentConfig::default()
         };
 
@@ -3889,6 +3912,96 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Exercises `Agent::trim_history`'s CHUNKED path (the method's chunked
+    /// branch is otherwise untested — all other agent trim tests use
+    /// `history_trim_chunked: false`).
+    ///
+    /// This asserts the method's ACTUAL behaviour, which gates on TOTAL
+    /// `self.history.len()` (system message included), not the free
+    /// `history::trim_history`'s non-system-count contract:
+    /// - With `max = 3`, the chunked threshold is `2 * max = 6` (total). A
+    ///   buffer of `system + 2*max - 1 = 6` total is exactly at the threshold
+    ///   → no-op (prefix stays byte-stable).
+    /// - One more message (`system + 2*max = 7` total) crosses the threshold
+    ///   → drains the non-system count back to `max`, keeping the system
+    ///   message and the most-recent tail.
+    #[test]
+    fn agent_trim_history_chunked_drains_to_max_past_threshold() {
+        let memory_cfg = zeroclaw_config::schema::MemoryConfig {
+            backend: "none".into(),
+            ..zeroclaw_config::schema::MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> = Arc::from(
+            zeroclaw_memory::create_memory(&memory_cfg, std::path::Path::new("/tmp"), None)
+                .expect("memory creation should succeed with valid config"),
+        );
+
+        let max = 3usize;
+        let agent_config = zeroclaw_config::schema::AliasedAgentConfig {
+            max_history_messages: max,
+            history_trim_chunked: true,
+            ..zeroclaw_config::schema::AliasedAgentConfig::default()
+        };
+
+        let observer: Arc<dyn Observer> = Arc::from(crate::observability::NoopObserver {});
+        let mut agent = Agent::builder()
+            .model_provider(Box::new(MockModelProvider {
+                responses: Mutex::new(vec![]),
+            }))
+            .tools(vec![Box::new(MockTool)])
+            .memory(mem)
+            .observer(observer)
+            .tool_dispatcher(Box::new(NativeToolDispatcher))
+            .workspace_dir(std::path::PathBuf::from("/tmp"))
+            .config(agent_config)
+            .build()
+            .expect("agent builder should succeed with valid config");
+
+        // system + (2*max - 1) non-system = 2*max total = exactly at the
+        // chunked threshold (the method's total-len guard) → no-op.
+        agent
+            .history
+            .push(ConversationMessage::Chat(ChatMessage::system("sys")));
+        for i in 0..(2 * max - 1) {
+            agent
+                .history
+                .push(ConversationMessage::Chat(ChatMessage::user(format!(
+                    "msg {i}"
+                ))));
+        }
+        assert_eq!(agent.history.len(), 2 * max);
+        agent.trim_history();
+        assert_eq!(
+            agent.history.len(),
+            2 * max,
+            "chunked trim must be a no-op at exactly 2*max total history length",
+        );
+
+        // One more message crosses the threshold (2*max + 1 total).
+        agent
+            .history
+            .push(ConversationMessage::Chat(ChatMessage::user("msg latest")));
+        assert_eq!(agent.history.len(), 2 * max + 1);
+        agent.trim_history();
+
+        // Drains the NON-SYSTEM count back to `max`; system + max = max + 1 total.
+        assert_eq!(
+            agent.history.len(),
+            max + 1,
+            "chunked trim must drain to max non-system messages (+system)",
+        );
+        // System message preserved at the head.
+        assert!(matches!(
+            agent.history.first(),
+            Some(ConversationMessage::Chat(c)) if c.role == "system"
+        ));
+        // Most-recent message preserved at the tail.
+        assert!(matches!(
+            agent.history.last(),
+            Some(ConversationMessage::Chat(c)) if c.content == "msg latest"
+        ));
     }
 
     // ── Duplicate narration guard ────────────────────────────────────
@@ -4250,6 +4363,10 @@ mod tests {
         // the very first new turn.
         let agent_config = zeroclaw_config::schema::AliasedAgentConfig {
             max_history_messages: 4,
+            // Legacy per-turn trim so the trim fires on the first new turn at
+            // this small message count. Chunked mode (default) only trims at
+            // 2*max, which would not fire here.
+            history_trim_chunked: false,
             ..zeroclaw_config::schema::AliasedAgentConfig::default()
         };
 
