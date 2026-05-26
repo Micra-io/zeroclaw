@@ -10846,6 +10846,20 @@ pub struct WhatsAppConfig {
     /// Bot identity is resolved from the wa-rs device at runtime; `pair_phone` seeds it on first connect.
     #[serde(default)]
     pub mention_only: bool,
+    /// Allowed group chats for WhatsApp Web. Each entry is a group JID
+    /// (e.g. `"120363...@g.us"`), `"*"` to allow all chats, or `"dm"` to allow
+    /// direct messages only. When non-empty, group messages whose chat JID is
+    /// not in this list are ignored; an empty list (the default) imposes no
+    /// restriction and preserves the prior behavior.
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    /// Bot name used for text-based mention detection in groups (e.g. "claw").
+    /// Case-insensitive. Only consulted when `mention_only = true` and the bot's
+    /// phone identity has not yet been resolved from the wa-rs device — it lets
+    /// a configured name count as a mention before the structured @-mention path
+    /// is available.
+    #[serde(default)]
+    pub mention_name: Option<String>,
     /// Usage mode for WhatsApp Web: "business" (default) or "personal".
     /// In personal mode the bot applies dm_policy, group_policy, and
     /// self_chat_mode to decide which chats to respond in.
@@ -17682,6 +17696,8 @@ bot_token = "xoxb-tok"
             pair_code: None,
             ws_url: None,
             mention_only: false,
+            allowed_groups: vec![],
+            mention_name: None,
             mode: WhatsAppWebMode::default(),
             dm_policy: WhatsAppChatPolicy::default(),
             group_policy: WhatsAppChatPolicy::default(),
@@ -17712,6 +17728,8 @@ bot_token = "xoxb-tok"
             pair_code: None,
             ws_url: None,
             mention_only: false,
+            allowed_groups: vec![],
+            mention_name: None,
             mode: WhatsAppWebMode::default(),
             dm_policy: WhatsAppChatPolicy::default(),
             group_policy: WhatsAppChatPolicy::default(),
@@ -17765,6 +17783,8 @@ allowed_numbers = ["+1", "+2"]
             pair_code: None,
             ws_url: None,
             mention_only: false,
+            allowed_groups: vec![],
+            mention_name: None,
             mode: WhatsAppWebMode::default(),
             dm_policy: WhatsAppChatPolicy::default(),
             group_policy: WhatsAppChatPolicy::default(),
@@ -17792,6 +17812,8 @@ allowed_numbers = ["+1", "+2"]
             pair_code: None,
             ws_url: None,
             mention_only: false,
+            allowed_groups: vec![],
+            mention_name: None,
             mode: WhatsAppWebMode::default(),
             dm_policy: WhatsAppChatPolicy::default(),
             group_policy: WhatsAppChatPolicy::default(),
@@ -17831,6 +17853,8 @@ allowed_numbers = ["+1", "+2"]
                     pair_code: None,
                     ws_url: None,
                     mention_only: false,
+                    allowed_groups: vec![],
+                    mention_name: None,
                     mode: WhatsAppWebMode::default(),
                     dm_policy: WhatsAppChatPolicy::default(),
                     group_policy: WhatsAppChatPolicy::default(),

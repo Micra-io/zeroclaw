@@ -73,6 +73,14 @@ pub struct WhatsAppWebChannel {
     peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
     /// When true, only respond to messages that @-mention the bot in groups
     mention_only: bool,
+    /// Allowed group chats (JID, "*" for all, or "dm" for DMs only). When
+    /// non-empty, group messages whose chat JID is not in the list are dropped
+    /// before any policy/mention checks. Empty = no restriction (allow all).
+    allowed_groups: Vec<String>,
+    /// Bot name for text-based mention detection (case-insensitive). Used as a
+    /// fallback when `mention_only` is on but the bot phone identity has not yet
+    /// been resolved from the wa-rs device.
+    mention_name: Option<String>,
     /// Bot phone number (digits only), resolved from pair_phone or device identity at runtime
     bot_phone: Arc<Mutex<Option<String>>>,
     /// Usage mode (business vs personal policy filtering)
@@ -130,6 +138,8 @@ impl WhatsAppWebChannel {
         let pair_code = config.pair_code.clone();
         let ws_url = config.ws_url.clone();
         let mention_only = config.mention_only;
+        let allowed_groups = config.allowed_groups.clone();
+        let mention_name = config.mention_name.clone();
         let mode = config.mode.clone();
         let dm_policy = config.dm_policy.clone();
         let group_policy = config.group_policy.clone();
@@ -160,6 +170,8 @@ impl WhatsAppWebChannel {
             alias: alias.into(),
             peer_resolver,
             mention_only,
+            allowed_groups,
+            mention_name,
             bot_phone: Arc::new(Mutex::new(bot_phone)),
             mode,
             dm_policy,
@@ -768,6 +780,93 @@ impl WhatsAppWebChannel {
 
         false
     }
+
+    /// Check whether a message's text contains the bot's configured
+    /// `mention_name` (case-insensitive substring match).
+    #[cfg(feature = "whatsapp-web")]
+    fn contains_mention_name(text: &str, mention_name: &str) -> bool {
+        text.to_lowercase().contains(&mention_name.to_lowercase())
+    }
+
+    /// Strip the first case-insensitive occurrence of `mention_name` from
+    /// `text`, preserving the original casing of the surrounding content, and
+    /// return the trimmed remainder. Used so the agent receives clean input
+    /// after the name-based mention is consumed.
+    ///
+    /// The match span is located by iterating the ORIGINAL string and
+    /// lowercasing a per-position window for comparison — `to_lowercase()` is
+    /// not length-preserving in Unicode (e.g. `İ` U+0130 → `i` + combining dot),
+    /// so a byte index computed from a lowercased copy can fall outside the
+    /// original string and panic. Internal whitespace is preserved; only the
+    /// matched name span is removed and the ends are trimmed.
+    #[cfg(feature = "whatsapp-web")]
+    fn strip_mention_name(text: &str, mention_name: &str) -> String {
+        let name_lower = mention_name.to_lowercase();
+        if name_lower.is_empty() {
+            return text.trim().to_string();
+        }
+
+        // Original-string byte offsets at every char boundary, plus the end.
+        // All slicing uses these so `before`/`after` are always rebuilt from
+        // the ORIGINAL bytes — never from a derived lowercased copy whose
+        // length may differ.
+        let mut boundaries: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+        boundaries.push(text.len());
+
+        // Try each char start position. The first match wins (matches the
+        // original `find` semantics). The final boundary is the end-of-string
+        // sentinel, so it is never a valid start.
+        for (start_idx, &start_byte) in boundaries.iter().enumerate().take(boundaries.len() - 1) {
+            if !text[start_byte..].to_lowercase().starts_with(&name_lower) {
+                continue;
+            }
+            // Walk forward one original char at a time and cut at the first
+            // char boundary whose lowercased prefix is at least as long as the
+            // name. Because the suffix lowercases to a string starting with
+            // `name_lower`, that boundary covers the full matched name.
+            for &end_byte in boundaries.iter().skip(start_idx + 1) {
+                if text[start_byte..end_byte].to_lowercase().len() >= name_lower.len() {
+                    let before = &text[..start_byte];
+                    let after = &text[end_byte..];
+                    return format!("{before}{after}").trim().to_string();
+                }
+            }
+        }
+
+        text.trim().to_string()
+    }
+
+    /// Check whether a chat JID is allowed by the `allowed_groups` policy.
+    ///
+    /// - empty slice — allow all (no restriction; preserves prior behavior)
+    /// - `"*"` — allow all chats
+    /// - `"dm"` — allow direct messages only
+    /// - explicit entry — match on the JID user part (prefix) or full JID
+    ///
+    /// `chat` is the chat JID string (e.g. `120363...@g.us` for groups,
+    /// `<phone>@s.whatsapp.net` for DMs); `sender` is the sender's user part.
+    #[cfg(feature = "whatsapp-web")]
+    fn is_chat_allowed(chat: &str, sender: &str, allowed_groups: &[String]) -> bool {
+        if allowed_groups.is_empty() {
+            return true;
+        }
+        let chat_prefix = chat.split('@').next().unwrap_or("");
+        let is_dm = chat.ends_with("@s.whatsapp.net") || chat_prefix == sender;
+
+        let allow_all = allowed_groups.iter().any(|g| g == "*");
+        let allow_dm = allowed_groups.iter().any(|g| g == "dm");
+        let explicit_match = allowed_groups.iter().any(|g| {
+            // The "*" / "dm" sentinels are handled above; never let them match
+            // a JID user-part (e.g. "dm".split('@').next() == "dm").
+            if g == "*" || g == "dm" {
+                return false;
+            }
+            let g_id = g.split('@').next().unwrap_or("");
+            g_id == chat_prefix || g == chat
+        });
+
+        allow_all || (is_dm && allow_dm) || explicit_match
+    }
 }
 
 /// Decide whether a `fromMe` message outside the operator's self-chat is an
@@ -1043,6 +1142,8 @@ impl Channel for WhatsAppWebChannel {
             let wa_group_policy = self.group_policy.clone();
             let wa_self_chat_mode = self.self_chat_mode;
             let mention_only = self.mention_only;
+            let allowed_groups = self.allowed_groups.clone();
+            let mention_name = self.mention_name.clone();
             let bot_phone_clone = self.bot_phone.clone();
             let wa_dm_mention_patterns = self.dm_mention_patterns.clone();
             let wa_group_mention_patterns = self.group_mention_patterns.clone();
@@ -1079,6 +1180,8 @@ impl Channel for WhatsAppWebChannel {
                     let wa_dm_policy = wa_dm_policy.clone();
                     let wa_group_policy = wa_group_policy.clone();
                     let bot_phone_inner = bot_phone_clone.clone();
+                    let allowed_groups = allowed_groups.clone();
+                    let mention_name = mention_name.clone();
                     let wa_dm_mention_patterns = wa_dm_mention_patterns.clone();
                     let wa_group_mention_patterns = wa_group_mention_patterns.clone();
                     async move {
@@ -1131,6 +1234,17 @@ impl Channel for WhatsAppWebChannel {
                                 );
                                 if reply_target != chat {
                                     ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"from": chat, "to": reply_target})), "LID→phone reply target");
+                                }
+
+                                // ── allowed_groups allowlist ──
+                                // When `allowed_groups` is non-empty, only chats
+                                // whose JID is in the list are processed. Runs
+                                // ahead of the per-mode policy and mention checks
+                                // so the bot stays silent in non-allowlisted
+                                // rooms. Empty list = no restriction.
+                                if !Self::is_chat_allowed(&chat, &sender, &allowed_groups) {
+                                    ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"chat": chat})), "chat not in allowed_groups, ignoring message");
+                                    return;
                                 }
 
                                 // ── Personal-mode chat-type policy filtering ──
@@ -1242,7 +1356,9 @@ impl Channel for WhatsAppWebChannel {
                                 // Use transcribed voice text, or fall back to text content.
                                 // Track whether this chat used a voice note so we reply in kind.
                                 // We store the chat JID (reply_target) since that's what send() receives.
-                                let content = if let Some(ref vt) = voice_text {
+                                // `mut` because the mention_name fallback below may strip the
+                                // configured name from the text before forwarding.
+                                let mut content = if let Some(ref vt) = voice_text {
                                     if let Ok(mut vs) = voice_chats.lock() {
                                         vs.insert(chat.clone());
                                     }
@@ -1265,8 +1381,11 @@ impl Channel for WhatsAppWebChannel {
 
                                 // mention_only: skip group messages without a bot mention
                                 if mention_only && is_group {
-                                    let bot_phone = bot_phone_inner.lock();
-                                    if let Some(ref bp) = *bot_phone {
+                                    // Take a snapshot of the resolved bot phone, then drop the
+                                    // guard before any further work so the lock is not held
+                                    // across the mention_name strip below.
+                                    let bot_phone = bot_phone_inner.lock().clone();
+                                    if let Some(ref bp) = bot_phone {
                                         let mentioned_jids =
                                             Self::extract_mentioned_jids(msg);
                                         if !Self::contains_bot_mention(
@@ -1275,6 +1394,21 @@ impl Channel for WhatsAppWebChannel {
                                             bp,
                                         ) {
                                             ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), "ignoring group message without bot mention");
+                                            return;
+                                        }
+                                    } else if let Some(ref name) = mention_name {
+                                        // Bot phone identity not yet resolved — fall back to a
+                                        // text-based mention_name match (e.g. "claw"). When the
+                                        // name is present, strip it so the agent sees clean
+                                        // input; otherwise drop the message.
+                                        if Self::contains_mention_name(&content, name) {
+                                            content = Self::strip_mention_name(&content, name);
+                                            if content.is_empty() {
+                                                ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), "message empty after stripping mention_name, skipping");
+                                                return;
+                                            }
+                                        } else {
+                                            ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), "mention_only active, no mention_name in group message, skipping");
                                             return;
                                         }
                                     } else {
@@ -2423,5 +2557,141 @@ mod tests {
         assert!(!fromme_outside_self_chat_is_operator_trigger(
             false, &dm, &group, ""
         ));
+    }
+
+    // ── is_chat_allowed (allowed_groups gate) ──────────────────
+
+    const GROUP_A: &str = "120363407513744860@g.us";
+    const GROUP_B: &str = "120363407668337348@g.us";
+    const DM_JID: &str = "15551234567@s.whatsapp.net";
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn allowed_groups_empty_allows_all() {
+        // Empty list = no restriction: every chat (group or DM) passes.
+        let allow: Vec<String> = vec![];
+        assert!(WhatsAppWebChannel::is_chat_allowed(GROUP_A, "15551234567", &allow));
+        assert!(WhatsAppWebChannel::is_chat_allowed(GROUP_B, "15551234567", &allow));
+        assert!(WhatsAppWebChannel::is_chat_allowed(DM_JID, "15551234567", &allow));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn allowed_groups_explicit_jid_filters() {
+        // Only the listed group JID is processed; others are filtered.
+        let allow = vec![GROUP_A.to_string()];
+        assert!(WhatsAppWebChannel::is_chat_allowed(GROUP_A, "15551234567", &allow));
+        assert!(!WhatsAppWebChannel::is_chat_allowed(GROUP_B, "15551234567", &allow));
+        // A DM is not in the allow-list either, so it is filtered.
+        assert!(!WhatsAppWebChannel::is_chat_allowed(DM_JID, "15551234567", &allow));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn allowed_groups_jid_prefix_match() {
+        // Listing the bare group id (user part) matches the full JID.
+        let allow = vec!["120363407513744860".to_string()];
+        assert!(WhatsAppWebChannel::is_chat_allowed(GROUP_A, "15551234567", &allow));
+        assert!(!WhatsAppWebChannel::is_chat_allowed(GROUP_B, "15551234567", &allow));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn allowed_groups_wildcard_allows_all() {
+        // "*" admits every chat even when the list is otherwise restrictive.
+        let allow = vec!["*".to_string()];
+        assert!(WhatsAppWebChannel::is_chat_allowed(GROUP_A, "15551234567", &allow));
+        assert!(WhatsAppWebChannel::is_chat_allowed(GROUP_B, "15551234567", &allow));
+        assert!(WhatsAppWebChannel::is_chat_allowed(DM_JID, "15551234567", &allow));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn allowed_groups_dm_only_admits_dms_not_groups() {
+        // "dm" admits direct messages but filters group chats.
+        let allow = vec!["dm".to_string()];
+        assert!(WhatsAppWebChannel::is_chat_allowed(DM_JID, "15551234567", &allow));
+        // Self-chat: chat user part == sender → treated as a DM, admitted.
+        assert!(WhatsAppWebChannel::is_chat_allowed(
+            "15551234567@g.us",
+            "15551234567",
+            &allow
+        ));
+        assert!(!WhatsAppWebChannel::is_chat_allowed(GROUP_A, "15551234567", &allow));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn allowed_groups_dm_admits_lid_dm_when_sender_matches_chat_prefix() {
+        // LID-form DM: chat is "<id>@lid" (not @s.whatsapp.net), but the chat
+        // user-part equals the sender, so the `chat_prefix == sender` branch
+        // classifies it as a DM and "dm" admits it.
+        let allow = vec!["dm".to_string()];
+        assert!(WhatsAppWebChannel::is_chat_allowed(
+            "76188559093817@lid",
+            "76188559093817",
+            &allow
+        ));
+        // A LID chat whose user-part differs from the sender is not a DM and
+        // must be filtered under a "dm"-only policy.
+        assert!(!WhatsAppWebChannel::is_chat_allowed(
+            "76188559093817@lid",
+            "99999999999999",
+            &allow
+        ));
+    }
+
+    // ── contains_mention_name / strip_mention_name ─────────────
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn mention_name_matches_case_insensitively() {
+        assert!(WhatsAppWebChannel::contains_mention_name("Hey Claw, status?", "claw"));
+        assert!(WhatsAppWebChannel::contains_mention_name("hey CLAW", "Claw"));
+        assert!(!WhatsAppWebChannel::contains_mention_name("hello world", "claw"));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn strip_mention_name_removes_first_occurrence_and_trims() {
+        // The configured name is removed and surrounding casing is preserved.
+        assert_eq!(
+            WhatsAppWebChannel::strip_mention_name("Claw what is the time", "claw"),
+            "what is the time"
+        );
+        assert_eq!(
+            WhatsAppWebChannel::strip_mention_name("Hey CLAW status", "claw"),
+            "Hey  status"
+        );
+        // No match → returns trimmed original.
+        assert_eq!(
+            WhatsAppWebChannel::strip_mention_name("  hello  ", "claw"),
+            "hello"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn strip_mention_name_handles_non_ascii_without_panic() {
+        // Regression: `İ` (U+0130) lowercases to two code units ("i̇"), so a
+        // byte index derived from `text.to_lowercase()` would overrun the
+        // original string and panic. The leading `İ` must survive and the
+        // name span must still be removed.
+        //
+        // Note the result keeps the TWO internal spaces that surrounded
+        // "claw" (one before, one after) — only the matched name is removed
+        // and the ends are trimmed; internal whitespace is intentionally NOT
+        // collapsed (matches `strip_mention_name_removes_first_occurrence_and_trims`,
+        // e.g. "Hey CLAW status" -> "Hey  status").
+        assert_eq!(
+            WhatsAppWebChannel::strip_mention_name("İ claw test", "claw"),
+            "İ  test"
+        );
+        // The originally-reported panic case: name immediately after a
+        // length-changing char, no surrounding spaces.
+        assert_eq!(
+            WhatsAppWebChannel::strip_mention_name("xİclaw", "claw"),
+            "xİ"
+        );
     }
 }
