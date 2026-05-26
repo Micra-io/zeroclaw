@@ -98,6 +98,7 @@ impl MarkdownMemory {
                     superseded_by: None,
                     agent_alias: None,
                     agent_id: None,
+                    metadata: None,
                 }
             })
             .collect()
@@ -310,6 +311,7 @@ impl Memory for MarkdownMemory {
         _namespace: Option<&str>,
         _importance: Option<f64>,
         _agent_id: Option<&str>,
+        _metadata: Option<&str>,
     ) -> anyhow::Result<()> {
         // Markdown's per-agent attribution is the on-disk path: the
         // backend writes into `<workspace_dir>/MEMORY.md` and the

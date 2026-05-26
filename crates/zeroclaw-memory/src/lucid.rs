@@ -190,6 +190,7 @@ impl LucidMemory {
                 superseded_by: None,
                 agent_alias: None,
                 agent_id: None,
+                metadata: None,
             });
         }
 
@@ -449,11 +450,13 @@ impl Memory for LucidMemory {
         namespace: Option<&str>,
         importance: Option<f64>,
         agent_id: Option<&str>,
+        metadata: Option<&str>,
     ) -> anyhow::Result<()> {
         // Lucid composes a local SqliteMemory + a remote Lucid daemon; the
         // remote side has no agent_id concept, so the attribution lives
         // only on the local SQLite mirror. The async sync to the daemon
-        // continues unchanged.
+        // continues unchanged. `metadata` is persisted on the local
+        // SQLite mirror alongside the row.
         self.local
             .store_with_agent(
                 key,
@@ -463,6 +466,7 @@ impl Memory for LucidMemory {
                 namespace,
                 importance,
                 agent_id,
+                metadata,
             )
             .await?;
         self.sync_to_lucid_async(key, content, &category).await;

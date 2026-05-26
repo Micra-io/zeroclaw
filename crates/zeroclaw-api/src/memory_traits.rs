@@ -62,6 +62,12 @@ pub struct MemoryEntry {
     /// wrapper compares on this field so backend-kind doesn't matter.
     #[serde(default, alias = "agent_id")]
     pub agent_id: Option<String>,
+    /// Optional structured metadata attached to this entry. Used by fork
+    /// channels to persist channel-specific context (e.g. the WhatsApp
+    /// group JID `{"group_jid":"...@g.us"}`) so downstream consumers can
+    /// distinguish messages by source group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 fn default_namespace() -> String {
@@ -80,6 +86,7 @@ impl std::fmt::Debug for MemoryEntry {
             .field("namespace", &self.namespace)
             .field("importance", &self.importance)
             .field("agent_alias", &self.agent_alias)
+            .field("metadata", &self.metadata)
             .finish_non_exhaustive()
     }
 }
@@ -349,10 +356,14 @@ pub trait Memory: Send + Sync + crate::attribution::Attributable {
         Ok(filtered)
     }
 
-    /// Store a memory entry with namespace and importance.
+    /// Store a memory entry with namespace, importance, and optional
+    /// structured metadata.
     ///
-    /// Default implementation delegates to `store()`. Backends with native
-    /// namespace/importance support should override.
+    /// `metadata` is a JSON string persisted verbatim by SQL backends
+    /// (e.g. `{"group_jid":"...@g.us"}`); it round-trips back into
+    /// [`MemoryEntry::metadata`] on recall. Default implementation
+    /// delegates to `store()`, dropping namespace/importance/metadata.
+    /// Backends with native column support should override.
     async fn store_with_metadata(
         &self,
         key: &str,
@@ -361,6 +372,7 @@ pub trait Memory: Send + Sync + crate::attribution::Attributable {
         session_id: Option<&str>,
         _namespace: Option<&str>,
         _importance: Option<f64>,
+        _metadata: Option<&str>,
     ) -> anyhow::Result<()> {
         self.store(key, content, category, session_id).await
     }
@@ -373,6 +385,13 @@ pub trait Memory: Send + Sync + crate::attribution::Attributable {
     /// attributes via the per-agent directory path; QdrantMemory
     /// persists in the vector payload; NoneMemory is a no-op stub.
     /// `AgentScopedMemory` is the canonical caller.
+    ///
+    /// `metadata` is an optional JSON string (e.g. the WhatsApp
+    /// `{"group_jid":"...@g.us"}` blob) persisted alongside the row by
+    /// SQL backends. It is the single persistence chokepoint for the
+    /// scoped path, so backends MUST NOT drop it: the orchestrator's
+    /// metadata reaches storage only through this method (via
+    /// `AgentScopedMemory::store_with_metadata` → `store_with_agent`).
     async fn store_with_agent(
         &self,
         key: &str,
@@ -382,6 +401,7 @@ pub trait Memory: Send + Sync + crate::attribution::Attributable {
         namespace: Option<&str>,
         importance: Option<f64>,
         agent_id: Option<&str>,
+        metadata: Option<&str>,
     ) -> anyhow::Result<()>;
 
     /// Recall memory entries scoped to a specific set of agent UUIDs.
@@ -478,6 +498,7 @@ mod tests {
             superseded_by: None,
             agent_alias: None,
             agent_id: None,
+            metadata: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();

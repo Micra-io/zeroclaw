@@ -363,7 +363,7 @@ impl Memory for PostgresMemory {
         // inserts; un-attributed callers like the heartbeat memory
         // path land under the synthesized `default` agent rather than
         // surfacing a constraint violation).
-        self.store_with_agent(key, content, category, session_id, None, None, None)
+        self.store_with_agent(key, content, category, session_id, None, None, None, None)
             .await
     }
 
@@ -593,6 +593,7 @@ impl Memory for PostgresMemory {
         _namespace: Option<&str>,
         _importance: Option<f64>,
         agent_id: Option<&str>,
+        _metadata: Option<&str>,
     ) -> Result<()> {
         let client = self.client.clone();
         let qualified_table = self.qualified_table.clone();

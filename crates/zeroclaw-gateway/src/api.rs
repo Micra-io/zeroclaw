@@ -1732,6 +1732,7 @@ mod tests {
             _namespace: Option<&str>,
             _importance: Option<f64>,
             _agent_id: Option<&str>,
+            _metadata: Option<&str>,
         ) -> anyhow::Result<()> {
             Ok(())
         }
