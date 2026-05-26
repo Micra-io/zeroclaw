@@ -5234,6 +5234,7 @@ fn build_channel_by_id(
                     let alias = alias.clone();
                     Arc::new(move || cfg_arc.read().channel_external_peers("whatsapp", &alias))
                 };
+                // delivery-only: no passive-observation store
                 Ok(Arc::new(WhatsAppWebChannel::new(wa, alias, peer_resolver)))
             }
             #[cfg(not(feature = "whatsapp-web"))]
@@ -6225,7 +6226,15 @@ fn collect_configured_channels(
                         display_name: "WhatsApp",
                         alias: Some(alias.clone()),
                         channel: Arc::new(
+                            // Passive observer writes to `<workspace>/sessions/sessions.db`.
+                            // The downstream maresme scanner reads the HARDCODED path
+                            // `~/.zeroclaw/workspace/sessions/sessions.db`, so we must pass the
+                            // install workspace dir — NOT `data_dir` (now `<install>/data` after
+                            // the upstream data/workspace split). `install_root_dir()` is the
+                            // install root (`<install>`, = `~/.zeroclaw`); joining "workspace"
+                            // reproduces the fork's old `config.workspace_dir` = `<install>/workspace`.
                             WhatsAppWebChannel::new(wa, alias.clone(), peer_resolver)
+                                .with_workspace_dir(config.install_root_dir().join("workspace"))
                                 .with_transcription(config.transcription.clone())
                                 .with_tts(&config)
                                 .with_dm_mention_patterns(wa.dm_mention_patterns.clone())
