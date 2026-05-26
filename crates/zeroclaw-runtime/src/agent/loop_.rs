@@ -9963,10 +9963,7 @@ This is an example, not an invocation."#;
             "chunked trim must drain to max (+system), not to 2*max",
         );
         // Most-recent message retained at the tail.
-        assert_eq!(
-            history.last().unwrap().content,
-            format!("msg {}", 2 * max)
-        );
+        assert_eq!(history.last().unwrap().content, format!("msg {}", 2 * max));
     }
 
     #[test]

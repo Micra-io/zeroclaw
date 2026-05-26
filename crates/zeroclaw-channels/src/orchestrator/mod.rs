@@ -3647,7 +3647,9 @@ async fn process_channel_message_body(
     if msg.reply_target.ends_with("@g.us") {
         let window = ctx.prompt_config.channels.group_context_window_minutes;
         let max_msgs = ctx.prompt_config.channels.group_context_max_messages;
-        if window > 0 && let Some(ref obs) = ctx.observe_store {
+        if window > 0
+            && let Some(ref obs) = ctx.observe_store
+        {
             let group_context = load_group_context(
                 obs,
                 &msg.reply_target,
@@ -8050,7 +8052,10 @@ pub async fn start_channels(
                     Ok(store) => {
                         ::zeroclaw_log::record!(
                             INFO,
-                            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            ),
                             "Group context observe store enabled"
                         );
                         Some(Arc::new(store))
@@ -8058,9 +8063,12 @@ pub async fn start_channels(
                     Err(e) => {
                         ::zeroclaw_log::record!(
                             WARN,
-                            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                                .with_attrs(::serde_json::json!({"error": format!("{e}")})),
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            )
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({"error": format!("{e}")})),
                             "Group context observe store disabled"
                         );
                         None
@@ -17435,9 +17443,13 @@ Done."#;
             let recent = now - chrono::Duration::minutes(5);
             {
                 let conn = store.conn.lock();
-                for (i, msg) in ["[+111] Hello everyone", "[+222] Anyone know a plumber?", "[+333] Try Pedro"]
-                    .iter()
-                    .enumerate()
+                for (i, msg) in [
+                    "[+111] Hello everyone",
+                    "[+222] Anyone know a plumber?",
+                    "[+333] Try Pedro",
+                ]
+                .iter()
+                .enumerate()
                 {
                     let ts = (recent + chrono::Duration::seconds(i as i64 * 60)).to_rfc3339();
                     conn.execute(
@@ -17448,7 +17460,10 @@ Done."#;
             }
 
             let result = load_group_context(store.as_ref(), "group123@g.us", 15, 30, 2000);
-            assert!(result.contains("Recent Group Conversation"), "got: {result}");
+            assert!(
+                result.contains("Recent Group Conversation"),
+                "got: {result}"
+            );
             // Timestamps should be prepended as [HH:MM]
             let expected_time = recent.format("%H:%M").to_string();
             assert!(
@@ -17803,7 +17818,6 @@ Done."#;
             calls[0][0].1
         );
     }
-
 }
 
 #[cfg(test)]
@@ -17833,5 +17847,4 @@ mod omitted_feature_tests {
              channel-telegram feature is not compiled in"
         );
     }
-
 }

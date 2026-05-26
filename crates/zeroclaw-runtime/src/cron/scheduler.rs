@@ -1881,7 +1881,9 @@ mod tests {
         // Legacy announce + channel + to → proceeds to deliver_announcement,
         // which returns Ok when no handler is registered (by design).
         assert!(
-            deliver_if_configured(&config, &job, "payload").await.is_ok(),
+            deliver_if_configured(&config, &job, "payload")
+                .await
+                .is_ok(),
             "legacy announce mode must still deliver"
         );
     }
