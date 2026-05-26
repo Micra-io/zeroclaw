@@ -745,39 +745,136 @@ async fn turn_propagates_provider_error() {
 // 8. History trimming during long conversations
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Chunked-mode contract (default): `max_history_messages` is a soft target.
+/// Each turn appends a user+assistant pair, so the buffer grows by 2 per
+/// turn until it crosses the `2 * max_history_messages` threshold, at which
+/// point `Agent::trim_history` drains non-system messages back down to
+/// `max_history_messages` in a single batch. This keeps the conversation
+/// prefix byte-stable for the next `max_history_messages` turns so the
+/// Anthropic message-level cache breakpoint survives across turns.
 #[tokio::test]
 async fn history_trims_after_max_messages() {
     let max_history = 6;
-    let mut responses = vec![];
-    for _ in 0..max_history + 5 {
-        responses.push(text_response("ok"));
-    }
+    // Enough turns to guarantee the chunked drain has fired at least once.
+    // Each turn adds a user + assistant pair; `2 * max_history + 2` turns
+    // push non-system count past the `2 * max_history` threshold.
+    let total_turns = 2 * max_history + 2;
+    let responses: Vec<_> = (0..total_turns).map(|_| text_response("ok")).collect();
 
     let model_provider = Box::new(ScriptedModelProvider::new(responses));
     let config = AliasedAgentConfig {
         max_history_messages: max_history,
-        // Legacy per-turn trim so the cap is enforced within this test's
-        // message count. Chunked mode (default) only trims at 2*max.
+        ..AliasedAgentConfig::default()
+    };
+
+    let mut agent = build_agent_with_config(model_provider, vec![], config);
+
+    for i in 0..total_turns {
+        let _ = agent.turn(&format!("msg {i}")).await.unwrap();
+    }
+
+    // Effective ceiling under chunked mode: system prompt + at most
+    // `2 * max_history_messages` non-system messages. Beyond this, the
+    // chunked drain must have fired.
+    let effective_ceiling = 1 + 2 * max_history;
+    assert!(
+        agent.history().len() <= effective_ceiling,
+        "History length {} exceeds effective ceiling {} (1 + 2 * max_history)",
+        agent.history().len(),
+        effective_ceiling,
+    );
+
+    // Sanity: without trimming, history would be `1 + 2 * total_turns`.
+    // Assert we are well below that so the trim-fire path is genuinely
+    // exercised (the previous assertion alone would also pass for a buggy
+    // no-op trim that kept everything below the ceiling by chance).
+    let untrimmed_len = 1 + 2 * total_turns;
+    assert!(
+        agent.history().len() < untrimmed_len,
+        "Chunked trim did not fire: history length {} equals untrimmed length {}",
+        agent.history().len(),
+        untrimmed_len,
+    );
+
+    // System prompt is always preserved as the first message.
+    let first = &agent.history()[0];
+    assert!(matches!(first, ConversationMessage::Chat(c) if c.role == "system"));
+}
+
+/// Soft-target contract (R3): within the chunked-mode growth window, trim
+/// is a no-op. Each turn adds a user+assistant pair, so `max_history - 1`
+/// turns leave the buffer at `1 + 2 * (max_history - 1)` messages — still
+/// below the `2 * max_history` threshold that fires the chunked drain.
+/// This property is what keeps the Anthropic message-level cache prefix
+/// byte-stable across `max_history` turns between drains.
+#[tokio::test]
+async fn history_growth_window_does_not_trim_in_chunked_mode() {
+    let max_history = 6;
+    let total_turns = max_history - 1; // stays strictly below the 2*max threshold
+    let responses: Vec<_> = (0..total_turns).map(|_| text_response("ok")).collect();
+
+    let model_provider = Box::new(ScriptedModelProvider::new(responses));
+    let config = AliasedAgentConfig {
+        max_history_messages: max_history,
+        ..AliasedAgentConfig::default()
+    };
+
+    let mut agent = build_agent_with_config(model_provider, vec![], config);
+
+    for i in 0..total_turns {
+        let _ = agent.turn(&format!("msg {i}")).await.unwrap();
+    }
+
+    // No drain should have fired. History contains the system prompt plus
+    // every user+assistant pair from every turn.
+    let expected = 1 + 2 * total_turns;
+    assert_eq!(
+        agent.history().len(),
+        expected,
+        "Chunked trim fired inside the growth window: history.len()={} but expected {}",
+        agent.history().len(),
+        expected,
+    );
+
+    let first = &agent.history()[0];
+    assert!(matches!(first, ConversationMessage::Chat(c) if c.role == "system"));
+}
+
+/// Legacy strict-cap contract (R4): when `history_trim_chunked` is off,
+/// `Agent::trim_history` reverts to per-turn trimming — the buffer is
+/// drained back to `max_history_messages` as soon as it exceeds the cap,
+/// preserving the pre-PR-#30 behaviour for operators who flip the flag.
+#[tokio::test]
+async fn history_trims_strictly_in_legacy_mode() {
+    let max_history = 6;
+    // Match the historical "max + 5 turns" volume so a regression that
+    // silently re-enables chunked semantics on the legacy path is caught.
+    let total_turns = max_history + 5;
+    let responses: Vec<_> = (0..total_turns).map(|_| text_response("ok")).collect();
+
+    let model_provider = Box::new(ScriptedModelProvider::new(responses));
+    let config = AliasedAgentConfig {
+        max_history_messages: max_history,
         history_trim_chunked: false,
         ..AliasedAgentConfig::default()
     };
 
     let mut agent = build_agent_with_config(model_provider, vec![], config);
 
-    for i in 0..max_history + 5 {
+    for i in 0..total_turns {
         let _ = agent.turn(&format!("msg {i}")).await.unwrap();
     }
 
-    // System prompt (1) + trimmed messages
-    // Should not exceed max_history + 1 (system prompt)
+    // Legacy per-turn trim keeps history at the strict cap: system prompt
+    // plus at most `max_history_messages` non-system messages.
+    let strict_cap = 1 + max_history;
     assert!(
-        agent.history().len() <= max_history + 1,
-        "History length {} exceeds max {} + 1 (system)",
+        agent.history().len() <= strict_cap,
+        "Legacy mode overshot strict cap: history.len()={} exceeds {} (1 + max_history)",
         agent.history().len(),
-        max_history,
+        strict_cap,
     );
 
-    // System prompt should always be preserved
     let first = &agent.history()[0];
     assert!(matches!(first, ConversationMessage::Chat(c) if c.role == "system"));
 }
