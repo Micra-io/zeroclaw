@@ -55,6 +55,7 @@ mod tests {
             tenant_id: None,
             agent_alias: None,
             agent_id: None,
+            metadata: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();

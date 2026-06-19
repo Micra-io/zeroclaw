@@ -120,9 +120,12 @@ impl Memory for AgentScopedMarkdownMemory {
         session_id: Option<&str>,
         namespace: Option<&str>,
         importance: Option<f64>,
+        metadata: Option<&str>,
     ) -> Result<()> {
         self.own
-            .store_with_metadata(key, content, category, session_id, namespace, importance)
+            .store_with_metadata(
+                key, content, category, session_id, namespace, importance, metadata,
+            )
             .await
     }
 
@@ -135,12 +138,15 @@ impl Memory for AgentScopedMarkdownMemory {
         namespace: Option<&str>,
         importance: Option<f64>,
         _agent_id: Option<&str>,
+        metadata: Option<&str>,
     ) -> Result<()> {
         // Markdown attribution lives on the on-disk path; the bound
         // agent's MarkdownMemory always writes to its own dir, so the
         // caller-supplied agent_id is intentionally ignored here.
         self.own
-            .store_with_metadata(key, content, category, session_id, namespace, importance)
+            .store_with_metadata(
+                key, content, category, session_id, namespace, importance, metadata,
+            )
             .await
     }
 

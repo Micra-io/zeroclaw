@@ -643,6 +643,7 @@ impl Memory for WasmMemory {
         namespace: Option<&str>,
         importance: Option<f64>,
         agent_id: Option<&str>,
+        _metadata: Option<&str>,
     ) -> Result<()> {
         let (key, content, session_id, namespace, agent_id) = (
             key.to_string(),

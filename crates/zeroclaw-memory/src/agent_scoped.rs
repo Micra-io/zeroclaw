@@ -132,6 +132,7 @@ impl Memory for AgentScopedMemory {
                 None,
                 None,
                 Some(&self.agent_id),
+                None,
             )
             .await
     }
@@ -144,7 +145,11 @@ impl Memory for AgentScopedMemory {
         session_id: Option<&str>,
         namespace: Option<&str>,
         importance: Option<f64>,
+        metadata: Option<&str>,
     ) -> Result<()> {
+        // Forward `metadata` through `store_with_agent` so the JSON blob
+        // (e.g. WhatsApp group JID) survives the scoped path; the inner
+        // backend is the single persistence chokepoint.
         self.inner
             .store_with_agent(
                 key,
@@ -154,6 +159,7 @@ impl Memory for AgentScopedMemory {
                 namespace,
                 importance,
                 Some(&self.agent_id),
+                metadata,
             )
             .await
     }
@@ -167,6 +173,7 @@ impl Memory for AgentScopedMemory {
         namespace: Option<&str>,
         importance: Option<f64>,
         agent_id: Option<&str>,
+        metadata: Option<&str>,
     ) -> Result<()> {
         // The wrapper's whole purpose is to make every persisted row
         // attributable to its bound agent. A caller passing an
@@ -200,6 +207,7 @@ impl Memory for AgentScopedMemory {
                 namespace,
                 importance,
                 Some(&self.agent_id),
+                metadata,
             )
             .await
     }
@@ -598,6 +606,7 @@ mod tests {
                 None,
                 None,
                 Some(other_uuid),
+                None,
             )
             .await
             .unwrap();
@@ -630,6 +639,7 @@ mod tests {
                 None,
                 None,
                 Some(beta_uuid),
+                None,
             )
             .await
             .unwrap();
@@ -663,6 +673,7 @@ mod tests {
                 None,
                 None,
                 Some(beta_uuid),
+                None,
             )
             .await
             .unwrap();
@@ -694,6 +705,7 @@ mod tests {
                 None,
                 None,
                 Some(beta_uuid),
+                None,
             )
             .await
             .unwrap();
@@ -728,6 +740,7 @@ mod tests {
                     None,
                     None,
                     Some(owner),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -761,6 +774,7 @@ mod tests {
                 None,
                 None,
                 Some(rogue_uuid),
+                None,
             )
             .await
             .expect_err(
@@ -804,6 +818,7 @@ mod tests {
                 None,
                 None,
                 Some(alpha_uuid),
+                None,
             )
             .await
             .unwrap();
@@ -816,6 +831,7 @@ mod tests {
                 None,
                 None,
                 Some(beta_uuid),
+                None,
             )
             .await
             .unwrap();
@@ -828,6 +844,7 @@ mod tests {
                 None,
                 None,
                 Some(alpha_uuid),
+                None,
             )
             .await
             .unwrap();
@@ -880,6 +897,7 @@ mod tests {
                 None,
                 None,
                 Some(rogue_uuid),
+                None,
             )
             .await
             .unwrap();

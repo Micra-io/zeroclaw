@@ -655,6 +655,7 @@ mod tests {
                 tenant_id: None,
                 agent_alias: agent_id.map(str::to_string),
                 agent_id: agent_id.map(str::to_string),
+                metadata: None,
             }
         }
     }
@@ -745,6 +746,7 @@ mod tests {
             namespace: Option<&str>,
             importance: Option<f64>,
             agent_id: Option<&str>,
+            _metadata: Option<&str>,
         ) -> anyhow::Result<()> {
             let entry = Self::entry(
                 key, content, category, session_id, namespace, importance, agent_id,

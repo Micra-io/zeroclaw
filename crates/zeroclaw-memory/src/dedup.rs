@@ -70,6 +70,7 @@ mod tests {
             tenant_id: None,
             agent_alias: None,
             agent_id: None,
+            metadata: None,
         }
     }
 

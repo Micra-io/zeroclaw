@@ -184,6 +184,7 @@ mod tests {
                 tenant_id: None,
                 agent_alias: None,
                 agent_id: None,
+                metadata: None,
             }])
         }
 
@@ -228,6 +229,7 @@ mod tests {
             _namespace: Option<&str>,
             _importance: Option<f64>,
             _agent_id: Option<&str>,
+            _metadata: Option<&str>,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -319,6 +321,7 @@ mod tests {
             _namespace: Option<&str>,
             _importance: Option<f64>,
             _agent_id: Option<&str>,
+            _metadata: Option<&str>,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -380,6 +383,7 @@ mod tests {
                     tenant_id: None,
                     agent_alias: None,
                     agent_id: None,
+                    metadata: None,
                 },
                 MemoryEntry {
                     id: "2".into(),
@@ -397,6 +401,7 @@ mod tests {
                     tenant_id: None,
                     agent_alias: None,
                     agent_id: None,
+                    metadata: None,
                 },
             ]),
         };
@@ -431,6 +436,7 @@ mod tests {
                     tenant_id: None,
                     agent_alias: None,
                     agent_id: None,
+                    metadata: None,
                 },
                 MemoryEntry {
                     id: "2".into(),
@@ -448,6 +454,7 @@ mod tests {
                     tenant_id: None,
                     agent_alias: None,
                     agent_id: None,
+                    metadata: None,
                 },
             ]),
         };

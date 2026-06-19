@@ -156,6 +156,7 @@ mod tests {
                 tenant_id: None,
                 agent_alias: None,
                 agent_id: None,
+                metadata: None,
             },
             MemoryEntry {
                 id: "2".into(),
@@ -173,6 +174,7 @@ mod tests {
                 tenant_id: None,
                 agent_alias: None,
                 agent_id: None,
+                metadata: None,
             },
         ];
 
@@ -208,6 +210,7 @@ mod tests {
             tenant_id: None,
             agent_alias: None,
             agent_id: None,
+            metadata: None,
         };
         let entries = vec![
             entry("active", "User prefers Rust for systems work", None),
