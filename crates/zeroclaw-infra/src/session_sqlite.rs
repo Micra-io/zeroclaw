@@ -233,6 +233,109 @@ impl SqliteSessionBackend {
 
         Ok(migrated)
     }
+
+    /// Accessor for the underlying connection mutex. Exposed (instead of making
+    /// the `conn` field `pub`) so tests and group-context tooling can run raw
+    /// SQL against the same DB the passive observer writes to.
+    #[must_use]
+    pub fn conn(&self) -> &Mutex<Connection> {
+        &self.conn
+    }
+
+    /// Like [`crate::session_backend::SessionBackend::load`] but also returns the `created_at`
+    /// timestamp for each row, bounded to the most recent `limit` rows. Used by
+    /// group-context injection so the LLM can reason about message recency.
+    /// Results are returned in chronological order (oldest first).
+    ///
+    /// Returns [`crate::session_backend::TimestampedMessage`] with `created_at`
+    /// parsed from the stored RFC3339 string (`None` if unparseable/absent).
+    pub fn load_since_with_time(
+        &self,
+        session_key: &str,
+        since: DateTime<Utc>,
+        limit: usize,
+    ) -> Vec<crate::session_backend::TimestampedMessage> {
+        use crate::session_backend::TimestampedMessage;
+        let conn = self.conn.lock();
+        let since_str = since.to_rfc3339();
+        // Bound the read at the DB: take the newest `limit` in-window rows
+        // (ORDER BY id DESC LIMIT), then reverse to restore chronological order.
+        let mut stmt = match conn.prepare(
+            "SELECT role, content, created_at FROM sessions \
+             WHERE session_key = ?1 AND created_at >= ?2 \
+             ORDER BY id DESC LIMIT ?3",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        #[allow(clippy::cast_possible_wrap)]
+        let rows = match stmt.query_map(params![session_key, since_str, limit as i64], |row| {
+            let role: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            let created_at_raw: Option<String> = row.get(2).ok();
+            let created_at = created_at_raw
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
+            Ok(TimestampedMessage {
+                message: ChatMessage { role, content },
+                created_at,
+            })
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut results: Vec<_> = rows.filter_map(std::result::Result::ok).collect();
+        results.reverse();
+        results
+    }
+
+    /// Load the last `n` messages for a session key regardless of time, with timestamps.
+    /// Results are returned in chronological order (oldest first).
+    ///
+    /// Returns [`crate::session_backend::TimestampedMessage`] with `created_at`
+    /// parsed from the stored RFC3339 string (`None` if unparseable/absent).
+    pub fn load_last_n_with_time(
+        &self,
+        session_key: &str,
+        n: usize,
+    ) -> Vec<crate::session_backend::TimestampedMessage> {
+        use crate::session_backend::TimestampedMessage;
+        let conn = self.conn.lock();
+        // Select in reverse order then reverse so we get the tail in chronological order.
+        let mut stmt = match conn.prepare(
+            "SELECT role, content, created_at FROM sessions \
+             WHERE session_key = ?1 \
+             ORDER BY id DESC LIMIT ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        #[allow(clippy::cast_possible_wrap)]
+        let rows = match stmt.query_map(params![session_key, n as i64], |row| {
+            let role: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            let created_at_raw: Option<String> = row.get(2).ok();
+            let created_at = created_at_raw
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
+            Ok(TimestampedMessage {
+                message: ChatMessage { role, content },
+                created_at,
+            })
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut results: Vec<_> = rows.filter_map(std::result::Result::ok).collect();
+        results.reverse();
+        results
+    }
 }
 
 impl SessionBackend for SqliteSessionBackend {
@@ -1542,5 +1645,133 @@ mod tests {
         assert_eq!(single.name, from_list.name);
         assert_eq!(single.created_at, from_list.created_at);
         assert_eq!(single.last_activity, from_list.last_activity);
+    }
+
+    #[test]
+    fn load_since_with_time_returns_only_recent_messages() {
+        let tmp = TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+        let key = "observe_whatsapp_test_group";
+
+        {
+            let conn = store.conn().lock();
+            conn.execute(
+                "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params!["observe_whatsapp_test_group", "user", "[+111] old message", "2026-03-24T08:00:00+00:00"],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params!["observe_whatsapp_test_group", "user", "[+222] recent message", "2026-03-24T09:50:00+00:00"],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params!["observe_whatsapp_test_group", "user", "[+333] newest message", "2026-03-24T09:55:00+00:00"],
+            ).unwrap();
+        }
+
+        let since = chrono::DateTime::parse_from_rfc3339("2026-03-24T09:45:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        // Generous limit: all in-window rows returned, oldest-first.
+        let messages = store.load_since_with_time(key, since, 10);
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].message.content.contains("recent message"));
+        assert!(messages[1].message.content.contains("newest message"));
+    }
+
+    #[test]
+    fn load_since_with_time_bounds_to_limit_keeping_newest_in_order() {
+        let tmp = TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+        let key = "observe_whatsapp_test_group";
+
+        {
+            let conn = store.conn().lock();
+            for (i, text) in ["first", "second", "third", "fourth"].iter().enumerate() {
+                let ts = format!("2026-03-24T09:5{i}:00+00:00");
+                conn.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![key, "user", format!("[+111] {text}"), ts],
+                ).unwrap();
+            }
+        }
+
+        let since = chrono::DateTime::parse_from_rfc3339("2026-03-24T09:45:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        // All 4 rows are in-window, but limit=2 keeps only the newest two,
+        // returned in chronological (oldest-first) order.
+        let messages = store.load_since_with_time(key, since, 2);
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].message.content.contains("third"));
+        assert!(messages[1].message.content.contains("fourth"));
+    }
+
+    #[test]
+    fn load_since_with_time_returns_empty_when_no_matches() {
+        let tmp = TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let since = Utc::now();
+        let messages = store.load_since_with_time("observe_whatsapp_empty", since, 30);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn load_last_n_with_time_returns_most_recent() {
+        let tmp = TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+        let key = "observe_whatsapp_test_group";
+
+        {
+            let conn = store.conn().lock();
+            for (i, text) in ["first", "second", "third", "fourth", "fifth"]
+                .iter()
+                .enumerate()
+            {
+                let ts = format!("2026-03-24T10:{i:02}:00+00:00");
+                conn.execute(
+                    "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![key, "user", format!("[+111] {text}"), ts],
+                ).unwrap();
+            }
+        }
+
+        let messages = store.load_last_n_with_time(key, 3);
+        assert_eq!(messages.len(), 3);
+        // Should be in chronological order (oldest first)
+        assert!(messages[0].message.content.contains("third"));
+        assert!(messages[1].message.content.contains("fourth"));
+        assert!(messages[2].message.content.contains("fifth"));
+    }
+
+    #[test]
+    fn load_last_n_with_time_returns_all_when_fewer_than_n() {
+        let tmp = TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+        let key = "observe_whatsapp_small";
+
+        {
+            let conn = store.conn().lock();
+            conn.execute(
+                "INSERT INTO sessions (session_key, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![key, "user", "[+111] only one", "2026-03-24T10:00:00+00:00"],
+            ).unwrap();
+        }
+
+        let messages = store.load_last_n_with_time(key, 10);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].message.content.contains("only one"));
+    }
+
+    #[test]
+    fn load_last_n_with_time_empty_session() {
+        let tmp = TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let messages = store.load_last_n_with_time("nonexistent", 5);
+        assert!(messages.is_empty());
     }
 }
