@@ -11947,6 +11947,18 @@ pub struct TelegramConfig {
     /// newest send is dropped and a `WARN` is logged.
     #[serde(default)]
     pub reply_queue_depth_max: u16,
+    /// Allowed chat IDs or keywords. Empty = allow all (no filtering).
+    /// Keywords: "dm" (private chats), "group" (groups + supergroups), "*" (all).
+    /// Numeric chat IDs for explicit matches (e.g. "-1001234567890").
+    /// Telegram "channel" type chats have no keyword — use explicit ID or "*".
+    #[serde(default)]
+    pub allowed_chats: Vec<String>,
+    /// Users allowed to DM the bot. Empty = allow all (no restriction).
+    /// When set, only these users can send direct messages to the bot.
+    /// Group messages are unaffected — governed by allowed_users + allowed_chats.
+    /// Supports usernames (without @) and numeric Telegram user IDs.
+    #[serde(default)]
+    pub allowed_dm_users: Vec<String>,
 }
 
 impl Default for TelegramConfig {
@@ -11965,6 +11977,8 @@ impl Default for TelegramConfig {
             excluded_tools: Vec::new(),
             reply_min_interval_secs: 0,
             reply_queue_depth_max: 0,
+            allowed_chats: Vec::new(),
+            allowed_dm_users: Vec::new(),
         }
     }
 }
@@ -20163,6 +20177,8 @@ auto_save = true
                         excluded_tools: vec![],
                         reply_min_interval_secs: 0,
                         reply_queue_depth_max: 0,
+                        allowed_chats: vec![],
+                        allowed_dm_users: vec![],
                     },
                 )]),
                 discord: HashMap::new(),
@@ -21398,6 +21414,8 @@ default_temperature = 0.7
             excluded_tools: vec![],
             reply_min_interval_secs: 0,
             reply_queue_depth_max: 0,
+            allowed_chats: vec![],
+            allowed_dm_users: vec![],
         };
         let json = serde_json::to_string(&tc).unwrap();
         let parsed: TelegramConfig = serde_json::from_str(&json).unwrap();
@@ -25151,6 +25169,8 @@ require_otp_to_resume = true
                 excluded_tools: vec![],
                 reply_min_interval_secs: 0,
                 reply_queue_depth_max: 0,
+                allowed_chats: vec![],
+                allowed_dm_users: vec![],
             },
         );
 

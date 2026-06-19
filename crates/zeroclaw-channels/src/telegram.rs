@@ -554,6 +554,10 @@ pub struct TelegramChannel {
         Arc<std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>>,
     /// Per-channel proxy URL override.
     proxy_url: Option<String>,
+    /// Allowed chat IDs or keywords (empty = allow all).
+    allowed_chats: Vec<String>,
+    /// Users allowed to DM the bot (empty = allow all).
+    allowed_dm_users: Vec<String>,
     /// Pre-computed tool command specs (name, description) for bot command registration.
     tool_command_specs: Vec<(String, String)>,
     /// Pending approval requests: callback_data key → oneshot sender.
@@ -589,6 +593,8 @@ impl TelegramChannel {
         alias: impl Into<String>,
         peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
         mention_only: bool,
+        allowed_chats: Vec<String>,
+        allowed_dm_users: Vec<String>,
     ) -> Self {
         let has_peers = !peer_resolver().is_empty();
         let pairing = if has_peers {
@@ -601,6 +607,46 @@ impl TelegramChannel {
             }
             Some(guard)
         };
+
+        let mut allowed_chats: Vec<String> = allowed_chats
+            .into_iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        allowed_chats.retain(|entry| match entry.as_str() {
+            "*" | "dm" | "group" => true,
+            id if id.parse::<i64>().is_ok() => true,
+            other => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({ "entry": other })),
+                    "Telegram allowed_chats: dropping unrecognized entry (expected 'dm', 'group', '*', or a numeric chat ID)"
+                );
+                false
+            }
+        });
+
+        let mut allowed_dm_users: Vec<String> = allowed_dm_users
+            .into_iter()
+            .map(|s| Self::normalize_identity(&s).to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        allowed_dm_users.retain(|entry| match entry.as_str() {
+            "*" => true,
+            id if id.parse::<i64>().is_ok() => true,
+            name if name.chars().all(|c| c.is_alphanumeric() || c == '_') => true,
+            other => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({ "entry": other })),
+                    "Telegram allowed_dm_users: dropping invalid entry (expected a username, numeric ID, or '*')"
+                );
+                false
+            }
+        });
 
         Self {
             bot_token,
@@ -626,6 +672,8 @@ impl TelegramChannel {
             static_voice_peers: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pending_voice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             proxy_url: None,
+            allowed_chats,
+            allowed_dm_users,
             tool_command_specs: Vec::new(),
             pending_approvals: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             approval_timeout_secs: 120,
@@ -1433,6 +1481,69 @@ impl TelegramChannel {
         identities.into_iter().any(|id| self.is_user_allowed(id))
     }
 
+    /// Check whether a chat is allowed by the `allowed_chats` policy.
+    ///
+    /// - empty slice — allow all (no restriction)
+    /// - `"*"` — allow all chats
+    /// - `"dm"` — allow private chats
+    /// - `"group"` — allow groups and supergroups
+    /// - numeric chat ID — exact match
+    ///
+    /// Note: Telegram "channel" type chats have no keyword; allow them by
+    /// explicit chat ID or `"*"`.
+    fn is_chat_allowed(chat_id: &str, chat_type: &str, allowed_chats: &[String]) -> bool {
+        if allowed_chats.is_empty() {
+            return true;
+        }
+        let is_dm = chat_type == "private";
+        let is_group = chat_type == "group" || chat_type == "supergroup";
+
+        let allowed = allowed_chats.iter().any(|entry| match entry.as_str() {
+            "*" => true,
+            "dm" => is_dm,
+            "group" => is_group,
+            id => id == chat_id,
+        });
+        if !allowed && !is_dm && !is_group && chat_type != "channel" && !chat_type.is_empty() {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(
+                        ::serde_json::json!({ "chat_id": chat_id, "chat_type": chat_type })
+                    ),
+                "Telegram: unknown chat type, not matched by any allowed_chats keyword"
+            );
+        }
+        allowed
+    }
+
+    /// Check whether a user is allowed to DM the bot.
+    ///
+    /// - empty slice — allow all (no restriction)
+    /// - `"*"` — allow all DMs
+    /// - username or numeric ID — case-insensitive match
+    ///
+    /// Non-DM chats (groups, supergroups, channels) always pass.
+    fn is_dm_user_allowed(
+        identities: &[&str],
+        chat_type: &str,
+        allowed_dm_users: &[String],
+    ) -> bool {
+        if chat_type != "private" {
+            return true;
+        }
+        if allowed_dm_users.is_empty() {
+            return true;
+        }
+        allowed_dm_users.iter().any(|entry| {
+            entry == "*"
+                || identities
+                    .iter()
+                    .any(|id| id.eq_ignore_ascii_case(entry.as_str()))
+        })
+    }
+
     async fn handle_unauthorized_message(&self, update: &serde_json::Value) {
         let Some(message) = update.get("message") else {
             return;
@@ -1748,11 +1859,38 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         let gated_caption =
             self.check_media_mention_gate(message, attachment.caption.as_deref())?;
 
+        let chat_type = message
+            .get("chat")
+            .and_then(|c| c.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         let chat_id = message
             .get("chat")
             .and_then(|chat| chat.get("id"))
             .and_then(serde_json::Value::as_i64)
             .map(|id| id.to_string())?;
+        if !Self::is_chat_allowed(&chat_id, chat_type, &self.allowed_chats) {
+            ::zeroclaw_log::record!(
+                DEBUG,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(
+                        ::serde_json::json!({ "chat_id": chat_id, "chat_type": chat_type })
+                    ),
+                "Telegram: ignoring attachment, chat not in allowed_chats"
+            );
+            return None;
+        }
+        if !Self::is_dm_user_allowed(&identities, chat_type, &self.allowed_dm_users) {
+            ::zeroclaw_log::record!(
+                DEBUG,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({ "chat_id": chat_id, "identity": identities.first().copied().unwrap_or("unknown") })),
+                "Telegram: ignoring DM attachment, user not in allowed_dm_users"
+            );
+            return None;
+        }
 
         let message_id = message
             .get("message_id")
@@ -1930,11 +2068,38 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         let voice_caption = message.get("caption").and_then(serde_json::Value::as_str);
         self.check_media_mention_gate(message, voice_caption)?;
 
+        let chat_type = message
+            .get("chat")
+            .and_then(|c| c.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         let chat_id = message
             .get("chat")
             .and_then(|chat| chat.get("id"))
             .and_then(serde_json::Value::as_i64)
             .map(|id| id.to_string())?;
+        if !Self::is_chat_allowed(&chat_id, chat_type, &self.allowed_chats) {
+            ::zeroclaw_log::record!(
+                DEBUG,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(
+                        ::serde_json::json!({ "chat_id": chat_id, "chat_type": chat_type })
+                    ),
+                "Telegram: ignoring voice, chat not in allowed_chats"
+            );
+            return None;
+        }
+        if !Self::is_dm_user_allowed(&identities, chat_type, &self.allowed_dm_users) {
+            ::zeroclaw_log::record!(
+                DEBUG,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({ "chat_id": chat_id, "identity": identities.first().copied().unwrap_or("unknown") })),
+                "Telegram: ignoring DM voice, user not in allowed_dm_users"
+            );
+            return None;
+        }
 
         let message_id = message
             .get("message_id")
@@ -2245,6 +2410,39 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             return None;
         }
 
+        let chat_id = message
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(serde_json::Value::as_i64)
+            .map(|id| id.to_string())?;
+        let chat_type = message
+            .get("chat")
+            .and_then(|c| c.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if !Self::is_chat_allowed(&chat_id, chat_type, &self.allowed_chats) {
+            ::zeroclaw_log::record!(
+                DEBUG,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(
+                        ::serde_json::json!({ "chat_id": chat_id, "chat_type": chat_type })
+                    ),
+                "Telegram: ignoring message, chat not in allowed_chats"
+            );
+            return None;
+        }
+        if !Self::is_dm_user_allowed(&identities, chat_type, &self.allowed_dm_users) {
+            ::zeroclaw_log::record!(
+                DEBUG,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({ "chat_id": chat_id, "identity": identities.first().copied().unwrap_or("unknown") })),
+                "Telegram: ignoring DM, user not in allowed_dm_users"
+            );
+            return None;
+        }
+
         let is_group = Self::is_group_message(message);
         if self.mention_only && is_group {
             let bot_username = self.bot_username.lock();
@@ -2256,12 +2454,6 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                 return None;
             }
         }
-
-        let chat_id = message
-            .get("chat")
-            .and_then(|chat| chat.get("id"))
-            .and_then(serde_json::Value::as_i64)
-            .map(|id| id.to_string())?;
 
         let message_id = message
             .get("message_id")
@@ -4154,6 +4346,8 @@ mod tests {
             "default",
             Arc::new(|| vec!["*".into()]),
             false,
+            vec![],
+            vec![],
         )
         .with_voice_peer_prefs(&config, "telegram", "default");
 
@@ -4198,6 +4392,8 @@ mod tests {
             "default",
             Arc::new(|| vec!["*".into()]),
             false,
+            vec![],
+            vec![],
         )
         .with_voice_peer_prefs(&config, "telegram", "default");
 
@@ -4220,6 +4416,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert_eq!(ch.name(), "telegram");
     }
@@ -4246,6 +4444,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             false,
+            vec![],
+            vec![],
         )
         .with_transcription(config);
 
@@ -4311,6 +4511,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let guard = ch.typing_handle.lock();
         assert!(guard.is_none());
@@ -4324,6 +4526,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
 
         // Manually insert a dummy handle
@@ -4349,6 +4553,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
 
         // Insert a dummy handle first
@@ -4374,6 +4580,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(!off.supports_draft_updates());
 
@@ -4382,6 +4590,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_streaming(StreamMode::Partial, 750);
         assert!(partial.supports_draft_updates());
@@ -4395,6 +4605,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             false,
+            vec![],
+            vec![],
         )
         .with_streaming(StreamMode::Partial, 0);
 
@@ -4412,6 +4624,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let id = ch
             .send_draft(&SendMessage::new("draft", "123"))
@@ -4428,6 +4642,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_streaming(StreamMode::Partial, 60_000);
         ch.last_draft_edit
@@ -4446,6 +4662,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_streaming(StreamMode::Partial, 0);
         let long_emoji_text = "😀".repeat(TELEGRAM_MAX_MESSAGE_LENGTH + 20);
@@ -4466,6 +4684,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_streaming(StreamMode::Partial, 0);
         let long_text = "a".repeat(TELEGRAM_MAX_MESSAGE_LENGTH + 64);
@@ -4484,6 +4704,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(Vec::new),
             mention_only,
+            vec![],
+            vec![],
         );
         assert_eq!(
             ch.api_url("getMe"),
@@ -4499,6 +4721,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(Vec::new),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_api_base("http://127.0.0.1:8081".to_string());
 
@@ -4516,6 +4740,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(Vec::new),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_api_base("http://127.0.0.1:8081/".to_string());
 
@@ -4563,6 +4789,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(ch.is_user_allowed("anyone"));
     }
@@ -4575,6 +4803,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["alice".into(), "bob".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(ch.is_user_allowed("alice"));
         assert!(!ch.is_user_allowed("eve"));
@@ -4588,6 +4818,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["@alice".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(ch.is_user_allowed("alice"));
     }
@@ -4600,6 +4832,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(Vec::new),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(!ch.is_user_allowed("anyone"));
     }
@@ -4612,6 +4846,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["alice".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(!ch.is_user_allowed("alice_bot"));
         assert!(!ch.is_user_allowed("alic"));
@@ -4626,6 +4862,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["alice".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(!ch.is_user_allowed(""));
     }
@@ -4638,6 +4876,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["Alice".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(ch.is_user_allowed("Alice"));
         assert!(!ch.is_user_allowed("alice"));
@@ -4652,6 +4892,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["alice".into(), "*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(ch.is_user_allowed("alice"));
         assert!(ch.is_user_allowed("bob"));
@@ -4666,6 +4908,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["123456789".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(ch.is_any_user_allowed(["unknown", "123456789"]));
     }
@@ -4678,6 +4922,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["alice".into(), "987654321".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(!ch.is_any_user_allowed(["unknown", "123456789"]));
     }
@@ -4690,6 +4936,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(Vec::new),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(ch.pairing_code_active());
     }
@@ -4702,6 +4950,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["alice".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(!ch.pairing_code_active());
     }
@@ -4784,6 +5034,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let update = serde_json::json!({
             "update_id": 1,
@@ -4818,6 +5070,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["555".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let update = serde_json::json!({
             "update_id": 2,
@@ -4849,6 +5103,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let update = serde_json::json!({
             "update_id": 3,
@@ -4886,6 +5142,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(Vec::new),
             mention_only,
+            vec![],
+            vec![],
         );
         assert_eq!(
             ch.api_url("sendDocument"),
@@ -4901,6 +5159,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(Vec::new),
             mention_only,
+            vec![],
+            vec![],
         );
         assert_eq!(
             ch.api_url("sendPhoto"),
@@ -4916,6 +5176,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(Vec::new),
             mention_only,
+            vec![],
+            vec![],
         );
         assert_eq!(
             ch.api_url("sendVideo"),
@@ -4931,6 +5193,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(Vec::new),
             mention_only,
+            vec![],
+            vec![],
         );
         assert_eq!(
             ch.api_url("sendAudio"),
@@ -4946,6 +5210,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(Vec::new),
             mention_only,
+            vec![],
+            vec![],
         );
         assert_eq!(
             ch.api_url("sendVoice"),
@@ -4964,6 +5230,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let file_bytes = b"Hello, this is a test file content".to_vec();
 
@@ -4991,6 +5259,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         // Minimal valid PNG header bytes
         let file_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
@@ -5010,6 +5280,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
 
         let result = ch
@@ -5032,6 +5304,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
 
         let result = ch
@@ -5051,6 +5325,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let path = Path::new("/nonexistent/path/to/file.txt");
 
@@ -5073,6 +5349,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let path = Path::new("/nonexistent/path/to/photo.jpg");
 
@@ -5089,6 +5367,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let path = Path::new("/nonexistent/path/to/video.mp4");
 
@@ -5105,6 +5385,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let path = Path::new("/nonexistent/path/to/audio.mp3");
 
@@ -5121,6 +5403,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let path = Path::new("/nonexistent/path/to/voice.ogg");
 
@@ -5255,6 +5539,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let file_bytes = b"test content".to_vec();
 
@@ -5285,6 +5571,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let file_bytes = vec![0x89, 0x50, 0x4E, 0x47];
 
@@ -5331,6 +5619,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_api_base(mock_server.uri());
         let file_bytes: Vec<u8> = vec![];
@@ -5354,6 +5644,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let file_bytes = b"content".to_vec();
 
@@ -5373,6 +5665,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let file_bytes = b"content".to_vec();
 
@@ -5602,6 +5896,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         {
             let mut cache = ch.bot_username.lock();
@@ -5635,6 +5931,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         {
             let mut cache = ch.bot_username.lock();
@@ -5710,6 +6008,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(ch.mention_only);
 
@@ -5719,6 +6019,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             disabled_mention_only,
+            vec![],
+            vec![],
         );
         assert!(!ch_disabled.mention_only);
     }
@@ -5747,6 +6049,8 @@ mod tests {
             "default",
             std::sync::Arc::new(|| vec!["*".into()]),
             true,
+            vec![],
+            vec![],
         );
         {
             let mut cache = ch.bot_username.lock();
@@ -5781,6 +6085,8 @@ mod tests {
             "default",
             std::sync::Arc::new(|| vec!["*".into()]),
             true,
+            vec![],
+            vec![],
         );
         {
             let mut cache = ch.bot_username.lock();
@@ -5804,6 +6110,8 @@ mod tests {
             "default",
             std::sync::Arc::new(|| vec!["*".into()]),
             true,
+            vec![],
+            vec![],
         );
         let dm = serde_json::json!({
             "message_id": 1,
@@ -5836,6 +6144,8 @@ mod tests {
             "default",
             std::sync::Arc::new(|| vec!["*".into()]),
             false,
+            vec![],
+            vec![],
         );
         let group_no_caption = group_message_with_caption(None);
         assert_eq!(
@@ -5856,6 +6166,8 @@ mod tests {
             "default",
             std::sync::Arc::new(|| vec!["*".into()]),
             true,
+            vec![],
+            vec![],
         );
         // Do NOT set bot_username — leave it None.
         let group = group_message_with_caption(Some("@somebody hi"));
@@ -6127,6 +6439,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let msg = serde_json::json!({
             "reply_to_message": {
@@ -6146,6 +6460,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let msg = serde_json::json!({
             "reply_to_message": {
@@ -6165,6 +6481,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let msg = serde_json::json!({
             "text": "just a regular message"
@@ -6184,6 +6502,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let msg = serde_json::json!({
             "message_thread_id": 42,
@@ -6207,6 +6527,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let msg = serde_json::json!({
             "message_thread_id": 42,
@@ -6229,6 +6551,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let msg = serde_json::json!({
             "reply_to_message": {
@@ -6248,6 +6572,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         // Pre-populate transcription cache
         ch.voice_transcriptions
@@ -6273,6 +6599,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let update = serde_json::json!({
             "message": {
@@ -6316,6 +6644,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_transcription(tc);
         assert!(ch.transcription.is_some());
@@ -6331,6 +6661,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_transcription(tc);
         assert!(ch.transcription.is_none());
@@ -6345,6 +6677,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let update = serde_json::json!({
             "message": {
@@ -6374,6 +6708,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_transcription(tc);
         let update = serde_json::json!({
@@ -6404,6 +6740,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["alice".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_transcription(tc);
         let update = serde_json::json!({
@@ -6483,6 +6821,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let chat_id: i64 = 12345;
         let message_id: i64 = 67;
@@ -6627,6 +6967,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_workspace_dir(std::path::PathBuf::from("/tmp/test_workspace"));
         assert_eq!(
@@ -6940,6 +7282,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert!(ch.ack_reactions);
     }
@@ -6953,6 +7297,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_ack_reactions(ack_enabled);
         assert!(!ch.ack_reactions);
@@ -6967,6 +7313,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_ack_reactions(ack_enabled);
         assert!(ch.ack_reactions);
@@ -7041,6 +7389,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
 
         let cases = vec![
@@ -7101,6 +7451,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let update = serde_json::json!({
             "update_id": 110,
@@ -7138,6 +7490,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let update = serde_json::json!({
             "update_id": 100,
@@ -7169,6 +7523,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let update = serde_json::json!({
             "update_id": 101,
@@ -7204,6 +7560,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let update = serde_json::json!({
             "update_id": 102,
@@ -7231,6 +7589,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let update = serde_json::json!({
             "update_id": 103,
@@ -7256,6 +7616,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let update = serde_json::json!({
             "update_id": 104,
@@ -7345,6 +7707,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_api_base(mock_server.uri());
 
@@ -7375,6 +7739,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_api_base(mock_server.uri());
 
@@ -7508,6 +7874,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_api_base(mock_server.uri())
         .with_workspace_dir(workspace.path().to_path_buf());
@@ -7552,6 +7920,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         )
         .with_api_base(mock_server.uri())
         .with_tool_command_specs(specs);
@@ -7569,6 +7939,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -7588,6 +7960,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         assert_eq!(ch.approval_timeout_secs, 120);
         let ch = ch.with_approval_timeout_secs(30);
@@ -7604,6 +7978,8 @@ mod tests {
             "telegram_test_alias",
             Arc::new(|| vec!["*".into()]),
             mention_only,
+            vec![],
+            vec![],
         );
         let approval_id = "test-approval-123".to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -7659,5 +8035,412 @@ mod tests {
     fn non_approval_callback_data_is_ignored() {
         let cb_data = "some_other_action:data";
         assert!(cb_data.strip_prefix("approval:").is_none());
+    }
+
+    // ── allowed_chats / allowed_dm_users filtering ──────────────────────────
+
+    #[test]
+    fn is_chat_allowed_empty_allows_all() {
+        assert!(TelegramChannel::is_chat_allowed("123", "private", &[]));
+        assert!(TelegramChannel::is_chat_allowed("-100999", "group", &[]));
+        assert!(TelegramChannel::is_chat_allowed(
+            "-100999",
+            "supergroup",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn is_chat_allowed_star_allows_all() {
+        let chats = vec!["*".to_string()];
+        assert!(TelegramChannel::is_chat_allowed("123", "private", &chats));
+        assert!(TelegramChannel::is_chat_allowed("-100999", "group", &chats));
+    }
+
+    #[test]
+    fn is_chat_allowed_dm_keyword() {
+        let chats = vec!["dm".to_string()];
+        assert!(TelegramChannel::is_chat_allowed("123", "private", &chats));
+        assert!(!TelegramChannel::is_chat_allowed(
+            "-100999", "group", &chats
+        ));
+        assert!(!TelegramChannel::is_chat_allowed(
+            "-100999",
+            "supergroup",
+            &chats
+        ));
+    }
+
+    #[test]
+    fn is_chat_allowed_group_keyword() {
+        let chats = vec!["group".to_string()];
+        assert!(!TelegramChannel::is_chat_allowed("123", "private", &chats));
+        assert!(TelegramChannel::is_chat_allowed("-100999", "group", &chats));
+        assert!(TelegramChannel::is_chat_allowed(
+            "-100999",
+            "supergroup",
+            &chats
+        ));
+    }
+
+    #[test]
+    fn is_chat_allowed_explicit_chat_id() {
+        let chats = vec!["-1001234567890".to_string()];
+        assert!(TelegramChannel::is_chat_allowed(
+            "-1001234567890",
+            "supergroup",
+            &chats
+        ));
+        assert!(!TelegramChannel::is_chat_allowed(
+            "-100999",
+            "supergroup",
+            &chats
+        ));
+        assert!(!TelegramChannel::is_chat_allowed("123", "private", &chats));
+    }
+
+    #[test]
+    fn is_chat_allowed_mixed_keywords_and_ids() {
+        let chats = vec!["group".to_string(), "456".to_string()];
+        assert!(TelegramChannel::is_chat_allowed("-100999", "group", &chats));
+        assert!(TelegramChannel::is_chat_allowed("456", "private", &chats));
+        assert!(!TelegramChannel::is_chat_allowed("789", "private", &chats));
+    }
+
+    #[test]
+    fn is_chat_allowed_channel_type_needs_explicit_id_or_star() {
+        let keywords_only = vec!["dm".to_string(), "group".to_string()];
+        assert!(!TelegramChannel::is_chat_allowed(
+            "-100123",
+            "channel",
+            &keywords_only
+        ));
+
+        let with_star = vec!["*".to_string()];
+        assert!(TelegramChannel::is_chat_allowed(
+            "-100123", "channel", &with_star
+        ));
+
+        let with_id = vec!["-100123".to_string()];
+        assert!(TelegramChannel::is_chat_allowed(
+            "-100123", "channel", &with_id
+        ));
+    }
+
+    #[test]
+    fn is_chat_allowed_keywords_are_case_insensitive() {
+        // Constructor normalizes to lowercase, so simulate that
+        let chats: Vec<String> = vec!["DM".to_string(), "Group".to_string()]
+            .into_iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        assert!(TelegramChannel::is_chat_allowed("123", "private", &chats));
+        assert!(TelegramChannel::is_chat_allowed("-100999", "group", &chats));
+        assert!(TelegramChannel::is_chat_allowed(
+            "-100999",
+            "supergroup",
+            &chats
+        ));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_empty_allows_all() {
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["alice"],
+            "private",
+            &[]
+        ));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["alice"],
+            "group",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_star_allows_all_dms() {
+        let users = vec!["*".to_string()];
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["alice"],
+            "private",
+            &users
+        ));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_specific_user() {
+        let users = vec!["alice".to_string()];
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["alice"],
+            "private",
+            &users
+        ));
+        assert!(!TelegramChannel::is_dm_user_allowed(
+            &["bob"],
+            "private",
+            &users
+        ));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_by_numeric_id() {
+        let users = vec!["2852312".to_string()];
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["unknown", "2852312"],
+            "private",
+            &users
+        ));
+        assert!(!TelegramChannel::is_dm_user_allowed(
+            &["unknown", "999"],
+            "private",
+            &users
+        ));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_non_dm_always_passes() {
+        let users = vec!["alice".to_string()];
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["bob"],
+            "group",
+            &users
+        ));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["bob"],
+            "supergroup",
+            &users
+        ));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["bob"],
+            "channel",
+            &users
+        ));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_mixed_users() {
+        let users = vec!["alice".to_string(), "2852312".to_string()];
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["alice"],
+            "private",
+            &users
+        ));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["unknown", "2852312"],
+            "private",
+            &users
+        ));
+        assert!(!TelegramChannel::is_dm_user_allowed(
+            &["bob", "999"],
+            "private",
+            &users
+        ));
+    }
+
+    #[test]
+    fn is_dm_user_allowed_case_insensitive() {
+        // Constructor lowercases entries, so simulate that
+        let users = vec!["alice".to_string()]; // would be "Alice" in config, lowered by constructor
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["Alice"],
+            "private",
+            &users
+        ));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["ALICE"],
+            "private",
+            &users
+        ));
+        assert!(TelegramChannel::is_dm_user_allowed(
+            &["alice"],
+            "private",
+            &users
+        ));
+        assert!(!TelegramChannel::is_dm_user_allowed(
+            &["bob"],
+            "private",
+            &users
+        ));
+    }
+
+    #[test]
+    fn constructor_lowercases_allowed_dm_users() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+            vec![],
+            vec!["AlexandMe".to_string(), "@BOB".to_string()],
+        );
+        assert!(ch.allowed_dm_users.iter().all(|u| u == &u.to_lowercase()));
+    }
+
+    #[test]
+    fn constructor_drops_invalid_allowed_chats() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+            vec![
+                "group".to_string(),
+                "groups".to_string(),
+                "dm".to_string(),
+                "bogus".to_string(),
+                "-100123".to_string(),
+            ],
+            vec![],
+        );
+        // "groups" and "bogus" should be dropped; "group", "dm", "-100123" kept
+        assert_eq!(ch.allowed_chats, vec!["group", "dm", "-100123"]);
+    }
+
+    #[test]
+    fn constructor_drops_invalid_allowed_dm_users() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+            vec![],
+            vec![
+                "alice".to_string(),
+                "has spaces".to_string(),
+                "*".to_string(),
+                "123".to_string(),
+            ],
+        );
+        // "has spaces" gets normalized (trim) but still contains a space, dropped
+        assert!(ch.allowed_dm_users.contains(&"alice".to_string()));
+        assert!(ch.allowed_dm_users.contains(&"*".to_string()));
+        assert!(ch.allowed_dm_users.contains(&"123".to_string()));
+        assert!(!ch.allowed_dm_users.iter().any(|u| u.contains(' ')));
+    }
+
+    #[test]
+    fn parse_update_message_rejects_disallowed_chat() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+            vec!["group".to_string()],
+            vec![],
+        );
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 1,
+                "text": "hello",
+                "from": { "id": 1, "username": "alice" },
+                "chat": { "id": 123, "type": "private" }
+            }
+        });
+        assert!(ch.parse_update_message(&update).is_none());
+    }
+
+    #[test]
+    fn parse_update_message_accepts_allowed_chat() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+            vec!["group".to_string()],
+            vec![],
+        );
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 1,
+                "text": "hello",
+                "from": { "id": 1, "username": "alice" },
+                "chat": { "id": -100999, "type": "supergroup" }
+            }
+        });
+        assert!(ch.parse_update_message(&update).is_some());
+    }
+
+    #[test]
+    fn parse_update_message_accepts_explicit_chat_id() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+            vec!["-100999".to_string()],
+            vec![],
+        );
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 1,
+                "text": "hello",
+                "from": { "id": 1, "username": "alice" },
+                "chat": { "id": -100999, "type": "supergroup" }
+            }
+        });
+        assert!(ch.parse_update_message(&update).is_some());
+    }
+
+    #[test]
+    fn parse_update_message_rejects_dm_from_non_allowed_user() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+            vec![],
+            vec!["alice".to_string()],
+        );
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 1,
+                "text": "hello",
+                "from": { "id": 999, "username": "bob" },
+                "chat": { "id": 999, "type": "private" }
+            }
+        });
+        assert!(ch.parse_update_message(&update).is_none());
+    }
+
+    #[test]
+    fn parse_update_message_accepts_dm_from_allowed_user() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+            vec![],
+            vec!["alice".to_string()],
+        );
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 1,
+                "text": "hello",
+                "from": { "id": 1, "username": "alice" },
+                "chat": { "id": 1, "type": "private" }
+            }
+        });
+        assert!(ch.parse_update_message(&update).is_some());
+    }
+
+    #[test]
+    fn parse_update_message_allows_group_from_non_dm_user() {
+        let ch = TelegramChannel::new(
+            "t".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            false,
+            vec![],
+            vec!["alice".to_string()],
+        );
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 1,
+                "text": "hello",
+                "from": { "id": 999, "username": "bob" },
+                "chat": { "id": -100999, "type": "supergroup" }
+            }
+        });
+        assert!(ch.parse_update_message(&update).is_some());
     }
 }

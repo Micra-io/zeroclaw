@@ -5751,6 +5751,8 @@ fn build_channel_by_id(
                     alias.clone(),
                     peer_resolver,
                     tg.mention_only,
+                    tg.allowed_chats.clone(),
+                    tg.allowed_dm_users.clone(),
                 )
                 .with_persistence(config_arc.clone())
                 .with_api_base(tg.api_base_url.clone())
@@ -6761,6 +6763,8 @@ fn collect_configured_channels(
                         alias.clone(),
                         peer_resolver,
                         tg.mention_only,
+                        tg.allowed_chats.clone(),
+                        tg.allowed_dm_users.clone(),
                     )
                     .with_persistence(config_arc.clone())
                     .with_api_base(tg.api_base_url.clone())
@@ -9360,9 +9364,15 @@ pub async fn deliver_announcement(
             let peers = config.channel_external_peers("telegram", alias);
             let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> =
                 Arc::new(move || peers.clone());
-            let ch =
-                TelegramChannel::new(tg.bot_token.clone(), alias, peer_resolver, tg.mention_only)
-                    .with_api_base(tg.api_base_url.clone());
+            let ch = TelegramChannel::new(
+                tg.bot_token.clone(),
+                alias,
+                peer_resolver,
+                tg.mention_only,
+                tg.allowed_chats.clone(),
+                tg.allowed_dm_users.clone(),
+            )
+            .with_api_base(tg.api_base_url.clone());
             zeroclaw_api::channel::Channel::send(&ch, &make_msg(&safe_output)).await?;
         }
         #[cfg(not(feature = "channel-telegram"))]
@@ -19579,6 +19589,8 @@ This is an example JSON object for profile settings."#;
                 excluded_tools: vec![],
                 reply_min_interval_secs: 0,
                 reply_queue_depth_max: 0,
+                allowed_chats: vec![],
+                allowed_dm_users: vec![],
             },
         );
         let config_arc = Arc::new(RwLock::new(config));
