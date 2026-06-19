@@ -325,6 +325,10 @@ impl PostgresMemory {
             superseded_by: None,
             agent_alias: row.try_get("agent_alias").ok(),
             agent_id: row.try_get("agent_id").ok(),
+            // Postgres has no native metadata column (see `store_with_agent`,
+            // which ignores `_metadata`), so entries from this backend never
+            // carry structured metadata.
+            metadata: None,
         })
     }
 }
@@ -406,7 +410,7 @@ impl Memory for PostgresMemory {
         // inserts; un-attributed callers like the heartbeat memory
         // path land under the synthesized `default` agent rather than
         // surfacing a constraint violation).
-        self.store_with_agent(key, content, category, session_id, None, None, None)
+        self.store_with_agent(key, content, category, session_id, None, None, None, None)
             .await
     }
 
@@ -721,6 +725,7 @@ impl Memory for PostgresMemory {
         _namespace: Option<&str>,
         _importance: Option<f64>,
         agent_id: Option<&str>,
+        _metadata: Option<&str>,
     ) -> Result<()> {
         let client = self.client.get().clone();
         let qualified_table = self.qualified_table.clone();

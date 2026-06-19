@@ -196,6 +196,7 @@ impl QdrantMemory {
                     superseded_by: None,
                     agent_alias: payload.agent_id.clone(),
                     agent_id: payload.agent_id,
+                    metadata: None,
                 })
             })
             .collect();
@@ -459,6 +460,7 @@ impl QdrantMemory {
                 superseded_by: None,
                 agent_alias: payload.agent_id.clone(),
                 agent_id: payload.agent_id,
+                metadata: None,
             })
         });
         Ok(entry)
@@ -551,7 +553,7 @@ impl Memory for QdrantMemory {
         category: MemoryCategory,
         session_id: Option<&str>,
     ) -> Result<()> {
-        self.store_with_agent(key, content, category, session_id, None, None, None)
+        self.store_with_agent(key, content, category, session_id, None, None, None, None)
             .await
     }
 
@@ -647,6 +649,7 @@ impl Memory for QdrantMemory {
                     superseded_by: None,
                     agent_alias: payload.agent_id.clone(),
                     agent_id: payload.agent_id,
+                    metadata: None,
                 })
             })
             .collect();
@@ -747,6 +750,7 @@ impl Memory for QdrantMemory {
                     superseded_by: None,
                     agent_alias: payload.agent_id.clone(),
                     agent_id: payload.agent_id,
+                    metadata: None,
                 })
             })
             .collect();
@@ -885,6 +889,7 @@ impl Memory for QdrantMemory {
         _namespace: Option<&str>,
         _importance: Option<f64>,
         agent_id: Option<&str>,
+        _metadata: Option<&str>,
     ) -> Result<()> {
         self.ensure_initialized().await?;
 
@@ -1058,6 +1063,7 @@ impl Memory for QdrantMemory {
                     superseded_by: None,
                     agent_alias: payload.agent_id.clone(),
                     agent_id: payload.agent_id,
+                    metadata: None,
                 })
             })
             .collect();

@@ -3278,6 +3278,7 @@ pub fn migrate_sqlite_memory_to_v3(db_path: &Path, conn: &Connection) -> MigResu
                 importance    REAL DEFAULT 0.5,
                 superseded_by TEXT,
                 agent_id      TEXT NOT NULL REFERENCES agents(id),
+                metadata      TEXT,
                 UNIQUE (agent_id, key)
              );
 

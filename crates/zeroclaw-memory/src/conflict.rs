@@ -153,6 +153,7 @@ mod tests {
                 superseded_by: None,
                 agent_alias: None,
                 agent_id: None,
+                metadata: None,
             },
             MemoryEntry {
                 id: "2".into(),
@@ -167,6 +168,7 @@ mod tests {
                 superseded_by: None,
                 agent_alias: None,
                 agent_id: None,
+                metadata: None,
             },
         ];
 
