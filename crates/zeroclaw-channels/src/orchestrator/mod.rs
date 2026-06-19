@@ -6832,6 +6832,9 @@ fn build_channel_by_id(
                     })
                 };
                 let workspace_dir = one_shot_channel_workspace_dir(&config, "whatsapp", &alias);
+                // delivery-only: no passive-observation store (no
+                // `.with_observe_workspace_dir`); `with_workspace_dir` here is
+                // upstream's file-delivery trust boundary, not the scanner feed.
                 Ok(Arc::new(
                     WhatsAppWebChannel::new(wa, alias, peer_resolver, allowed_groups_resolver)
                         .with_workspace_dir(workspace_dir),
@@ -8237,11 +8240,25 @@ fn collect_configured_channels(
                         alias: Some(alias.clone()),
                         channel: crate::paced_channel::PacedChannel::wrap(
                             Arc::new(
+                                // Passive observer writes to `<workspace>/sessions/sessions.db`.
+                                // The downstream maresme scanner reads the HARDCODED path
+                                // `~/.zeroclaw/workspace/sessions/sessions.db`, so we must pass the
+                                // install workspace dir — NOT `data_dir` (now `<install>/data` after
+                                // the upstream data/workspace split, which is also what upstream's
+                                // `.with_workspace_dir(workspace_dir)` below resolves to). The two
+                                // builders coexist: `with_workspace_dir` sets the file-delivery trust
+                                // boundary; `with_observe_workspace_dir` opens the scanner feed.
+                                // `install_root_dir()` is the install root (`<install>`,
+                                // = `~/.zeroclaw`); joining "workspace" reproduces the fork's old
+                                // `config.workspace_dir` = `<install>/workspace`.
                                 WhatsAppWebChannel::new(
                                     wa,
                                     alias.clone(),
                                     peer_resolver,
                                     allowed_groups_resolver,
+                                )
+                                .with_observe_workspace_dir(
+                                    config.install_root_dir().join("workspace"),
                                 )
                                 .with_transcription(config.transcription.clone())
                                 .with_tts(&config)
