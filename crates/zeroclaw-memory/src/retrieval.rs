@@ -366,6 +366,7 @@ mod tests {
             superseded_by: None,
             agent_alias: None,
             agent_id: None,
+            metadata: None,
         };
         let first_window_key = RetrievalPipeline::cache_key(
             "project",
@@ -438,6 +439,7 @@ mod tests {
             superseded_by: None,
             agent_alias: None,
             agent_id: None,
+            metadata: None,
         };
         pipeline.store_in_cache(ck, vec![fake_entry]);
 

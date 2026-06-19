@@ -62,6 +62,7 @@ mod tests {
             superseded_by: None,
             agent_alias: None,
             agent_id: None,
+            metadata: None,
         }
     }
 

@@ -4264,13 +4264,29 @@ async fn process_channel_message_body(
         && !zeroclaw_memory::should_skip_autosave_content(&autosave_content)
     {
         let autosave_key = conversation_memory_key(&msg);
+        // Persist the WhatsApp group JID as structured metadata so the
+        // downstream maresme scanner can distinguish messages by source
+        // group. Only group reply targets (`...@g.us`) carry a JID; DMs
+        // and other channels store no metadata.
+        //
+        // Deliberately WhatsApp-JID-specific: group_jid stores a real
+        // @g.us JID, not the abstract "group:" reply-target form handled
+        // by is_group_reply_target. A `group:`-prefixed target is not a
+        // JID, so this check intentionally diverges from that helper.
+        let metadata = msg
+            .reply_target
+            .ends_with("@g.us")
+            .then(|| ::serde_json::json!({ "group_jid": msg.reply_target }).to_string());
         let _ = ctx
             .memory
-            .store(
+            .store_with_metadata(
                 &autosave_key,
                 &autosave_content,
                 zeroclaw_memory::MemoryCategory::Conversation,
                 Some(&history_key),
+                None,
+                None,
+                metadata.as_deref(),
             )
             .await;
     }
@@ -14728,6 +14744,7 @@ BTC is currently around $65,000 based on latest tool output."#
             _namespace: Option<&str>,
             _importance: Option<f64>,
             _agent_id: Option<&str>,
+            _metadata: Option<&str>,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -14794,6 +14811,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 superseded_by: None,
                 agent_alias: None,
                 agent_id: None,
+                metadata: None,
             }])
         }
 
@@ -14834,6 +14852,7 @@ BTC is currently around $65,000 based on latest tool output."#
             _namespace: Option<&str>,
             _importance: Option<f64>,
             _agent_id: Option<&str>,
+            _metadata: Option<&str>,
         ) -> anyhow::Result<()> {
             Ok(())
         }

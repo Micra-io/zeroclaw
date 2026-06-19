@@ -5600,6 +5600,7 @@ mod tests {
             _namespace: Option<&str>,
             _importance: Option<f64>,
             _agent_id: Option<&str>,
+            _metadata: Option<&str>,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -5751,6 +5752,7 @@ mod tests {
             _namespace: Option<&str>,
             _importance: Option<f64>,
             _agent_id: Option<&str>,
+            _metadata: Option<&str>,
         ) -> anyhow::Result<()> {
             self.store(key, content, category, session_id).await
         }

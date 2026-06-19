@@ -151,12 +151,28 @@ mod tests {
     async fn purge_namespace_removes_only_all_matching_memories() {
         let (_tmp, mem) = test_mem();
 
-        mem.store_with_metadata("a", "data", MemoryCategory::Core, None, Some("ns1"), None)
-            .await
-            .unwrap();
-        mem.store_with_metadata("b", "data", MemoryCategory::Core, None, Some("ns2"), None)
-            .await
-            .unwrap();
+        mem.store_with_metadata(
+            "a",
+            "data",
+            MemoryCategory::Core,
+            None,
+            Some("ns1"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        mem.store_with_metadata(
+            "b",
+            "data",
+            MemoryCategory::Core,
+            None,
+            Some("ns2"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let in_ns1 =
             |entries: &[MemoryEntry]| entries.iter().filter(|e| e.namespace == "ns1").count();
@@ -246,6 +262,7 @@ mod tests {
             None,
             Some("test-ns"),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -275,6 +292,7 @@ mod tests {
             MemoryCategory::Core,
             None,
             Some("test-ns"),
+            None,
             None,
         )
         .await
