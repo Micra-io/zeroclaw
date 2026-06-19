@@ -39,6 +39,10 @@ use waproto::whatsapp::device_props::PlatformType;
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
 #[cfg(feature = "whatsapp-web")]
 use zeroclaw_api::media::MediaAttachment;
+#[cfg(feature = "whatsapp-web")]
+use zeroclaw_infra::session_backend::SessionBackend;
+#[cfg(feature = "whatsapp-web")]
+use zeroclaw_infra::session_sqlite::SqliteSessionBackend;
 use zeroclaw_runtime::i18n;
 
 /// WhatsApp Web channel using wa-rs with custom rusqlite storage
@@ -126,6 +130,11 @@ pub struct WhatsAppWebChannel {
     /// Resolves allowed group chats from canonical config at message-time.
     /// Empty = all groups permitted. Direct messages bypass.
     allowed_groups_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// Passive observer store — writes all group messages (including non-mention)
+    /// to sessions.db for downstream scanner consumption.
+    /// None when `with_observe_workspace_dir` was not called (e.g. cron
+    /// delivery-only channel).
+    observe_store: Option<Arc<SqliteSessionBackend>>,
 }
 
 impl WhatsAppWebChannel {
@@ -197,6 +206,7 @@ impl WhatsAppWebChannel {
             dm_mention_patterns: Arc::new(Vec::new()),
             group_mention_patterns: Arc::new(Vec::new()),
             workspace_dir: None,
+            observe_store: None,
         }
     }
 
@@ -209,6 +219,44 @@ impl WhatsAppWebChannel {
     #[cfg(feature = "whatsapp-web")]
     pub fn with_workspace_dir(mut self, dir: PathBuf) -> Self {
         self.workspace_dir = Some(dir);
+        self
+    }
+
+    /// Enable passive group-message observation for downstream scanner consumption.
+    ///
+    /// Opens `sessions.db` under `{workspace_dir}/sessions/sessions.db`. On failure,
+    /// logs a warning and disables passive storage (non-fatal). The daemon callsite
+    /// passes the install workspace dir (`<install>/workspace`, i.e.
+    /// `~/.zeroclaw/workspace` in the standard layout) so the maresme scanner — which
+    /// reads the HARDCODED path `~/.zeroclaw/workspace/sessions/sessions.db` — sees the
+    /// observations. The cron delivery-only callsite intentionally omits this so no
+    /// passive store is opened for delivery-only channels.
+    ///
+    /// Distinct from upstream's `with_workspace_dir`, which sets the file-delivery
+    /// trust boundary (`workspace_dir`, resolved to the agent `data_dir`). This
+    /// builder keeps its own `observe_store` field targeting the install workspace
+    /// dir, which is a different directory after the upstream data/workspace split.
+    #[cfg(feature = "whatsapp-web")]
+    pub fn with_observe_workspace_dir(mut self, workspace_dir: std::path::PathBuf) -> Self {
+        match SqliteSessionBackend::new(&workspace_dir) {
+            Ok(backend) => {
+                ::zeroclaw_log::record!(
+                    INFO,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                    "WhatsApp Web: passive observer store enabled"
+                );
+                self.observe_store = Some(Arc::new(backend));
+            }
+            Err(e) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                    "WhatsApp Web: failed to open observer store"
+                );
+            }
+        }
         self
     }
 
@@ -1867,6 +1915,7 @@ impl Channel for WhatsAppWebChannel {
             let wa_dm_mention_patterns = self.dm_mention_patterns.clone();
             let wa_group_mention_patterns = self.group_mention_patterns.clone();
             let allowed_groups_resolver = Arc::clone(&self.allowed_groups_resolver);
+            let observe_store = self.observe_store.clone();
 
             // whatsapp-rust 0.6: BotBuilder gained a 4th typestate slot for the
             // async runtime (oxidezap/whatsapp-rust#621). `with_runtime` is
@@ -1905,6 +1954,7 @@ impl Channel for WhatsAppWebChannel {
                     let wa_group_mention_patterns = wa_group_mention_patterns.clone();
                     let allowed_groups_resolver = Arc::clone(&allowed_groups_resolver);
                     let mention_name = mention_name.clone();
+                    let observe_store = observe_store.clone();
                     async move {
                         // whatsapp-rust 0.6: event handlers receive `Arc<Event>`
                         // per PR #613, so we match against `&*event` to get a
@@ -2132,6 +2182,32 @@ impl Channel for WhatsAppWebChannel {
                                 if content.is_empty() {
                                     ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), &format!("ignoring empty or non-text message from {}", normalized));
                                     return;
+                                }
+
+                                // ── Passive group observation (maresme scanner feed) ──
+                                // Fires AFTER the allowed_groups gate (already returned for
+                                // non-allowlisted chats above) and BEFORE the mention_only
+                                // gate so that all group messages — whether or not they
+                                // mention the bot — are captured for downstream processing.
+                                // Errors are logged and never block message dispatch.
+                                //
+                                // `is_group` here is the `info.source.is_group` binding (set
+                                // above), capturing every allowed group message regardless of
+                                // the mention gate.
+                                if is_group && let Some(ref store) = observe_store {
+                                    let session_key = format!("observe_whatsapp_{chat}");
+                                    let formatted = format!("[{normalized}] {content}");
+                                    let turn =
+                                        zeroclaw_api::model_provider::ChatMessage::user(formatted);
+                                    if let Err(e) = store.append(&session_key, &turn) {
+                                        ::zeroclaw_log::record!(
+                                            WARN,
+                                            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                                .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                                            "WhatsApp Web: failed to write passive observation"
+                                        );
+                                    }
                                 }
 
                                 // mention_only: skip group messages without a bot mention
@@ -3863,5 +3939,29 @@ mod tests {
             format_contact_line("Pedro Garcia", None),
             "[Contact] Pedro Garcia"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn observe_store_writes_non_mention_group_messages() {
+        // Ports fork test: observe_store_writes_non_mention_group_messages.
+        // Validates that SqliteSessionBackend::append stores messages under
+        // the observe_whatsapp_<JID> key format used by the maresme scanner.
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        let group_jid = "120363407668337348@g.us";
+        let sender = "+34622922443";
+        let content = "Hey, does anyone know a good plumber?";
+        let session_key = format!("observe_whatsapp_{group_jid}");
+        let formatted = format!("[{sender}] {content}");
+
+        let turn = zeroclaw_api::model_provider::ChatMessage::user(formatted.clone());
+        backend.append(&session_key, &turn).unwrap();
+
+        let loaded = backend.load(&session_key);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].role, "user");
+        assert_eq!(loaded[0].content, formatted);
     }
 }
