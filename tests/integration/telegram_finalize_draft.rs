@@ -13,6 +13,8 @@ fn test_channel(mock_url: &str) -> TelegramChannel {
         "telegram_test_alias",
         peer_resolver,
         mention_only,
+        vec![],
+        vec![],
     )
     .with_api_base(mock_url.to_string())
 }
