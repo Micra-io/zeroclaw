@@ -2210,6 +2210,8 @@ mod tests {
                 excluded_tools: vec![],
                 reply_min_interval_secs: 0,
                 reply_queue_depth_max: 0,
+                allowed_chats: vec![],
+                allowed_dm_users: vec![],
             },
         );
         assert!(has_supervised_channels(&config));
@@ -2450,6 +2452,8 @@ mod tests {
                 excluded_tools: vec![],
                 reply_min_interval_secs: 0,
                 reply_queue_depth_max: 0,
+                allowed_chats: vec![],
+                allowed_dm_users: vec![],
             },
         );
 
@@ -2478,6 +2482,8 @@ mod tests {
                 excluded_tools: vec![],
                 reply_min_interval_secs: 0,
                 reply_queue_depth_max: 0,
+                allowed_chats: vec![],
+                allowed_dm_users: vec![],
             },
         );
         // Inbound peer authorization lives in peer_groups in V3.
