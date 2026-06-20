@@ -3271,9 +3271,15 @@ pub struct ResolvedRuntime {
     /// `2 * max_history_messages` and trims back down to
     /// `max_history_messages` in a single batch, keeping the conversation
     /// prefix byte-stable for `max_history_messages` turns at a time so the
-    /// Anthropic message-level cache breakpoint hits reliably. Set to `false`
-    /// to restore the per-turn trim behaviour (drops one message the moment
-    /// the count exceeds `max_history_messages`). Default: `true`.
+    /// Anthropic message-level cache breakpoint hits reliably. When `false`,
+    /// the per-turn trim behaviour applies (drops one message the moment the
+    /// count exceeds `max_history_messages`).
+    ///
+    /// This is a global fork default resolved from
+    /// `default_agent_history_trim_chunked()` (currently always `true`); unlike
+    /// its sibling `ResolvedRuntime` fields it is intentionally NOT exposed as a
+    /// per-agent / runtime-profile config override, since chunked trimming is a
+    /// cache-stability optimisation that is always beneficial.
     pub history_trim_chunked: bool,
     pub tool_receipts: ToolReceiptsConfig,
 }
@@ -11983,12 +11989,12 @@ pub struct TelegramConfig {
     /// Allowed chat IDs or keywords. Empty = allow all (no filtering).
     /// Keywords: "dm" (private chats), "group" (groups + supergroups), "*" (all).
     /// Numeric chat IDs for explicit matches (e.g. "-1001234567890").
-    /// Telegram "channel" type chats have no keyword — use explicit ID or "*".
+    /// Telegram "channel" type chats have no keyword; use explicit ID or "*".
     #[serde(default)]
     pub allowed_chats: Vec<String>,
     /// Users allowed to DM the bot. Empty = allow all (no restriction).
     /// When set, only these users can send direct messages to the bot.
-    /// Group messages are unaffected — governed by allowed_users + allowed_chats.
+    /// Group messages are unaffected; governed by allowed_users + allowed_chats.
     /// Supports usernames (without @) and numeric Telegram user IDs.
     #[serde(default)]
     pub allowed_dm_users: Vec<String>,
@@ -12893,7 +12899,7 @@ pub struct WhatsAppConfig {
     pub allowed_groups: Vec<String>,
     /// Bot name used for text-based mention detection in groups (e.g. "claw").
     /// Case-insensitive. Only consulted when `mention_only = true` and the bot's
-    /// phone identity has not yet been resolved from the wa-rs device — it lets
+    /// phone identity has not yet been resolved from the wa-rs device; it lets
     /// a configured name count as a mention before the structured @-mention path
     /// is available.
     #[tab(Behavior)]
