@@ -929,6 +929,7 @@ pub async fn run(
         // Profile values (when set) override the agent's inline fields.
         // See `Config::resolved_agent_config` for precedence rules.
         let eff_max_history_messages = agent.resolved.max_history_messages;
+        let eff_history_trim_chunked = agent.resolved.history_trim_chunked;
         let eff_max_context_tokens = agent.resolved.max_context_tokens;
         let eff_compact_context = agent.resolved.compact_context;
         let eff_max_system_prompt_chars = agent.resolved.max_system_prompt_chars;
@@ -2396,13 +2397,23 @@ pub async fn run(
                                 .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
                                 "Context compression failed, falling back to history trim"
                             );
-                            trim_history(&mut history, eff_max_history_messages / 2);
+                            // Emergency fallback: trim immediately (legacy
+                            // per-turn behaviour), the cache breakpoint is
+                            // already lost in this recovery path.
+                            trim_history(&mut history, eff_max_history_messages / 2, false);
                         }
                     }
                 }
 
-                // Hard cap as a safety net.
-                trim_history(&mut history, eff_max_history_messages);
+                // Hard cap as a safety net. Use chunked mode (when enabled) to
+                // keep the conversation prefix byte-stable for
+                // max_history_messages turns, preserving the Anthropic
+                // message-level cache breakpoint.
+                trim_history(
+                    &mut history,
+                    eff_max_history_messages,
+                    eff_history_trim_chunked,
+                );
 
                 // Restore base system prompt (remove per-turn thinking prefix).
                 if thinking_params.system_prompt_prefix.is_some()
@@ -9571,7 +9582,7 @@ This is an example, not an invocation."#;
         let original_len = history.len();
         assert!(original_len > DEFAULT_MAX_HISTORY_MESSAGES + 1);
 
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES, false);
 
         // System prompt preserved
         assert_eq!(history[0].role, "system");
@@ -9586,6 +9597,61 @@ This is an example, not an invocation."#;
         );
     }
 
+    /// Chunked mode must NOT trim while the non-system count is in
+    /// `(max, 2*max]`. Holding the buffer steady keeps the conversation
+    /// prefix byte-stable so the Anthropic message-level cache breakpoint
+    /// (`apply_cache_to_last_message`) survives across turns. Legacy
+    /// per-turn mode would trim immediately at `max + 1`, moving the prefix
+    /// and busting the incremental cache every turn.
+    #[test]
+    fn trim_history_chunked_holds_between_max_and_double_max() {
+        let max = 10;
+        let mut history = vec![ChatMessage::system("system prompt")];
+        // 2*max non-system messages: exactly at the chunked threshold.
+        for i in 0..(2 * max) {
+            history.push(ChatMessage::user(format!("msg {i}")));
+        }
+        let len_before = history.len();
+
+        // chunked = true: at the threshold (not above it), nothing is dropped.
+        trim_history(&mut history, max, true);
+        assert_eq!(
+            history.len(),
+            len_before,
+            "chunked trim must be a no-op at exactly 2*max so the prefix stays byte-stable",
+        );
+
+        // For comparison: legacy per-turn mode trims the same buffer down to
+        // `max` immediately, which is what invalidates the cache every turn.
+        trim_history(&mut history, max, false);
+        assert_eq!(history.len(), max + 1, "legacy mode trims to max (+system)");
+    }
+
+    /// Once the non-system count exceeds `2*max`, chunked mode drains back to
+    /// exactly `max` in a single batch (not to `2*max`), preserving the
+    /// system prompt and the most-recent messages.
+    #[test]
+    fn trim_history_chunked_drains_to_max_past_double_max() {
+        let max = 10;
+        let mut history = vec![ChatMessage::system("system prompt")];
+        // 2*max + 1 non-system messages: one past the chunked threshold.
+        for i in 0..(2 * max + 1) {
+            history.push(ChatMessage::user(format!("msg {i}")));
+        }
+
+        trim_history(&mut history, max, true);
+
+        // System prompt preserved + drained down to exactly `max` non-system.
+        assert_eq!(history[0].role, "system");
+        assert_eq!(
+            history.len(),
+            max + 1,
+            "chunked trim must drain to max (+system), not to 2*max",
+        );
+        // Most-recent message retained at the tail.
+        assert_eq!(history.last().unwrap().content, format!("msg {}", 2 * max));
+    }
+
     #[test]
     fn trim_history_noop_when_within_limit() {
         let mut history = vec![
@@ -9593,7 +9659,7 @@ This is an example, not an invocation."#;
             ChatMessage::user("hello"),
             ChatMessage::assistant("hi"),
         ];
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES, false);
         assert_eq!(history.len(), 3);
     }
 
@@ -10067,7 +10133,7 @@ This is an example, not an invocation."#;
         for i in 0..DEFAULT_MAX_HISTORY_MESSAGES + 20 {
             history.push(ChatMessage::user(format!("msg {i}")));
         }
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES, false);
         assert_eq!(history.len(), DEFAULT_MAX_HISTORY_MESSAGES);
     }
 
@@ -10079,7 +10145,7 @@ This is an example, not an invocation."#;
             history.push(ChatMessage::user(format!("user {i}")));
             history.push(ChatMessage::assistant(format!("assistant {i}")));
         }
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES, false);
         assert_eq!(history[0].role, "system");
         assert_eq!(history[history.len() - 1].role, "assistant");
     }
@@ -10088,7 +10154,7 @@ This is an example, not an invocation."#;
     fn trim_history_with_only_system_prompt() {
         // Recovery: Only system prompt should not be trimmed
         let mut history = vec![ChatMessage::system("system prompt")];
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES, false);
         assert_eq!(history.len(), 1);
     }
 
@@ -10296,14 +10362,14 @@ Let me check the result."#;
     #[test]
     fn trim_history_empty_history() {
         let mut history: Vec<ChatMessage> = vec![];
-        trim_history(&mut history, 10);
+        trim_history(&mut history, 10, false);
         assert!(history.is_empty());
     }
 
     #[test]
     fn trim_history_system_only() {
         let mut history = vec![ChatMessage::system("system prompt")];
-        trim_history(&mut history, 10);
+        trim_history(&mut history, 10, false);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].role, "system");
     }
@@ -10315,7 +10381,7 @@ Let me check the result."#;
             ChatMessage::user("msg 1"),
             ChatMessage::assistant("reply 1"),
         ];
-        trim_history(&mut history, 2); // 2 non-system messages = exactly at limit
+        trim_history(&mut history, 2, false); // 2 non-system messages = exactly at limit
         assert_eq!(history.len(), 3, "should not trim when exactly at limit");
     }
 
@@ -10334,7 +10400,7 @@ Let me check the result."#;
             ChatMessage::assistant("recent reply"),
         ];
         // max_history = 3 → keep anchor + 2 most recent (=3 non-system).
-        trim_history(&mut history, 3);
+        trim_history(&mut history, 3, false);
         assert_eq!(history[0].role, "system");
         assert_eq!(
             history[1].content, "anchor: what's the task",
@@ -10354,7 +10420,7 @@ Let me check the result."#;
             ChatMessage::assistant("middle"),
             ChatMessage::user("recent"),
         ];
-        trim_history(&mut history, 1);
+        trim_history(&mut history, 1, false);
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].role, "system");
         assert_eq!(history[1].content, "recent");

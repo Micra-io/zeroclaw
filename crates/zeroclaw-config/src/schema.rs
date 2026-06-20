@@ -3267,6 +3267,14 @@ pub struct ResolvedRuntime {
     pub context_compression: crate::scattered_types::ContextCompressionConfig,
     pub max_tool_result_chars: usize,
     pub keep_tool_context_turns: usize,
+    /// When `true`, `trim_history` only fires once the history exceeds
+    /// `2 * max_history_messages` and trims back down to
+    /// `max_history_messages` in a single batch, keeping the conversation
+    /// prefix byte-stable for `max_history_messages` turns at a time so the
+    /// Anthropic message-level cache breakpoint hits reliably. Set to `false`
+    /// to restore the per-turn trim behaviour (drops one message the moment
+    /// the count exceeds `max_history_messages`). Default: `true`.
+    pub history_trim_chunked: bool,
     pub tool_receipts: ToolReceiptsConfig,
 }
 
@@ -3290,6 +3298,7 @@ impl Default for ResolvedRuntime {
             context_compression: crate::scattered_types::ContextCompressionConfig::default(),
             max_tool_result_chars: default_max_tool_result_chars(),
             keep_tool_context_turns: default_keep_tool_context_turns(),
+            history_trim_chunked: default_agent_history_trim_chunked(),
             tool_receipts: ToolReceiptsConfig::default(),
         }
     }
@@ -3748,6 +3757,10 @@ impl Config {
             max_system_prompt_chars: self.effective_max_system_prompt_chars(agent_alias),
             max_tool_result_chars: self.effective_max_tool_result_chars(agent_alias),
             keep_tool_context_turns: self.effective_keep_tool_context_turns(agent_alias),
+            // Not a runtime_profile knob (no `effective_*` helper); the trim
+            // cache-stability behaviour is a global fork default. Resolves
+            // straight from `default_agent_history_trim_chunked()` (true).
+            history_trim_chunked: default_agent_history_trim_chunked(),
             ..ResolvedRuntime::default()
         };
         if let Some(profile) = self.runtime_profile_for_agent(agent_alias) {
@@ -5191,6 +5204,10 @@ fn default_max_tool_result_chars() -> usize {
 
 fn default_keep_tool_context_turns() -> usize {
     2
+}
+
+fn default_agent_history_trim_chunked() -> bool {
+    true
 }
 
 fn default_agent_tool_dispatcher() -> String {

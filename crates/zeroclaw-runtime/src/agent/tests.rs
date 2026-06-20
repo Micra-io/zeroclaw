@@ -747,6 +747,9 @@ async fn history_trims_after_max_messages() {
     let config = AliasedAgentConfig {
         resolved: zeroclaw_config::schema::ResolvedRuntime {
             max_history_messages: max_history,
+            // Legacy per-turn trim so the cap is enforced within this test's
+            // message count. Chunked mode (default) only trims at 2*max.
+            history_trim_chunked: false,
             ..Default::default()
         },
         ..AliasedAgentConfig::default()
