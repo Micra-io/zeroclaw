@@ -2592,11 +2592,12 @@ fn parse_vcard_fields(vcard: &str) -> Option<(String, Option<String>)> {
             }
         } else if phone.is_none()
             && let Some(rest) = line.strip_prefix("TEL")
-            && let Some((_params, value)) = rest.split_once(':') {
-                let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    phone = Some(trimmed.to_string());
-                }
+            && let Some((_params, value)) = rest.split_once(':')
+        {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                phone = Some(trimmed.to_string());
+            }
         }
     }
     name.map(|n| (n, phone))
@@ -3823,9 +3824,17 @@ mod tests {
     #[test]
     #[cfg(feature = "whatsapp-web")]
     fn mention_name_matches_case_insensitively() {
-        assert!(WhatsAppWebChannel::contains_mention_name("Hey Claw, status?", "claw"));
-        assert!(WhatsAppWebChannel::contains_mention_name("hey CLAW", "Claw"));
-        assert!(!WhatsAppWebChannel::contains_mention_name("hello world", "claw"));
+        assert!(WhatsAppWebChannel::contains_mention_name(
+            "Hey Claw, status?",
+            "claw"
+        ));
+        assert!(WhatsAppWebChannel::contains_mention_name(
+            "hey CLAW", "Claw"
+        ));
+        assert!(!WhatsAppWebChannel::contains_mention_name(
+            "hello world",
+            "claw"
+        ));
     }
 
     #[test]
@@ -3867,9 +3876,13 @@ mod tests {
     #[test]
     #[cfg(feature = "whatsapp-web")]
     fn parse_vcard_basic() {
-        let vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Pedro Garcia\nTEL;type=CELL:+34612345678\nEND:VCARD";
+        let vcard =
+            "BEGIN:VCARD\nVERSION:3.0\nFN:Pedro Garcia\nTEL;type=CELL:+34612345678\nEND:VCARD";
         let result = parse_vcard_fields(vcard);
-        assert_eq!(result, Some(("Pedro Garcia".to_string(), Some("+34612345678".to_string()))));
+        assert_eq!(
+            result,
+            Some(("Pedro Garcia".to_string(), Some("+34612345678".to_string())))
+        );
     }
 
     #[test]
@@ -3885,7 +3898,10 @@ mod tests {
     fn parse_vcard_multiple_phones_takes_first() {
         let vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Pedro\nTEL;type=CELL:+34611\nTEL;type=HOME:+34622\nEND:VCARD";
         let result = parse_vcard_fields(vcard);
-        assert_eq!(result, Some(("Pedro".to_string(), Some("+34611".to_string()))));
+        assert_eq!(
+            result,
+            Some(("Pedro".to_string(), Some("+34611".to_string())))
+        );
     }
 
     #[test]
@@ -3901,7 +3917,10 @@ mod tests {
         // A `TEL:` line with no type params (no `;`) still parses the phone.
         let vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Pedro\nTEL:+34600111222\nEND:VCARD";
         let result = parse_vcard_fields(vcard);
-        assert_eq!(result, Some(("Pedro".to_string(), Some("+34600111222".to_string()))));
+        assert_eq!(
+            result,
+            Some(("Pedro".to_string(), Some("+34600111222".to_string())))
+        );
     }
 
     #[test]
