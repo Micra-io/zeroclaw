@@ -13291,6 +13291,14 @@ pub struct WhatsAppConfig {
     #[tab(Advanced)]
     #[serde(default)]
     pub allowed_groups: Vec<String>,
+    /// Bot name used for text-based mention detection in groups (e.g. "claw").
+    /// Case-insensitive. Only consulted when `mention_only = true` and the bot's
+    /// phone identity has not yet been resolved from the wa-rs device — it lets
+    /// a configured name count as a mention before the structured @-mention path
+    /// is available.
+    #[tab(Behavior)]
+    #[serde(default)]
+    pub mention_name: Option<String>,
     /// Per-channel proxy URL (http, https, socks5, socks5h).
     /// Overrides the global `[proxy]` setting for this channel only.
     #[tab(Advanced)]
@@ -23131,6 +23139,7 @@ bot_token = "xoxb-tok"
             dm_mention_patterns: vec![],
             group_mention_patterns: vec![],
             allowed_groups: vec![],
+            mention_name: None,
             proxy_url: None,
             approval_timeout_secs: 300,
             excluded_tools: vec![],
@@ -23165,6 +23174,7 @@ bot_token = "xoxb-tok"
             dm_mention_patterns: vec![],
             group_mention_patterns: vec![],
             allowed_groups: vec![],
+            mention_name: None,
             proxy_url: None,
             approval_timeout_secs: 300,
             excluded_tools: vec![],
@@ -23222,6 +23232,7 @@ allowed_numbers = ["+1", "+2"]
             dm_mention_patterns: vec![],
             group_mention_patterns: vec![],
             allowed_groups: vec![],
+            mention_name: None,
             proxy_url: None,
             approval_timeout_secs: 300,
             excluded_tools: vec![],
@@ -23253,6 +23264,7 @@ allowed_numbers = ["+1", "+2"]
             dm_mention_patterns: vec![],
             group_mention_patterns: vec![],
             allowed_groups: vec![],
+            mention_name: None,
             proxy_url: None,
             approval_timeout_secs: 300,
             excluded_tools: vec![],
@@ -23331,6 +23343,7 @@ allowed_numbers = ["+1", "+2"]
                     dm_mention_patterns: vec![],
                     group_mention_patterns: vec![],
                     allowed_groups: vec![],
+                    mention_name: None,
                     proxy_url: None,
                     approval_timeout_secs: 300,
                     excluded_tools: vec![],

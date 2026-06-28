@@ -75,6 +75,10 @@ pub struct WhatsAppWebChannel {
     peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
     /// When true, only respond to messages that @-mention the bot in groups
     mention_only: bool,
+    /// Bot name for text-based mention detection (case-insensitive). Used as a
+    /// fallback when `mention_only` is on but the bot phone identity has not yet
+    /// been resolved from the wa-rs device.
+    mention_name: Option<String>,
     /// Bot phone number (digits only), resolved from pair_phone or device identity at runtime
     bot_phone: Arc<Mutex<Option<String>>>,
     /// Bot LID number (digits only), resolved from device identity at runtime
@@ -143,6 +147,7 @@ impl WhatsAppWebChannel {
         let pair_code = config.pair_code.clone();
         let ws_url = config.ws_url.clone();
         let mention_only = config.mention_only;
+        let mention_name = config.mention_name.clone();
         let mode = config.mode.clone();
         let dm_policy = config.dm_policy.clone();
         let group_policy = config.group_policy.clone();
@@ -173,6 +178,7 @@ impl WhatsAppWebChannel {
             alias: alias.into(),
             peer_resolver,
             mention_only,
+            mention_name,
             bot_phone: Arc::new(Mutex::new(bot_phone)),
             bot_lid: Arc::new(Mutex::new(None)),
             mode,
@@ -1168,6 +1174,61 @@ impl WhatsAppWebChannel {
         Self::contains_bot_mention(text, &mentioned_jids, bot_phone, bot_lid)
             || Self::is_reply_to_bot(msg, bot_phone, bot_lid)
     }
+
+    /// Check whether a message's text contains the bot's configured
+    /// `mention_name` (case-insensitive substring match).
+    #[cfg(feature = "whatsapp-web")]
+    fn contains_mention_name(text: &str, mention_name: &str) -> bool {
+        text.to_lowercase().contains(&mention_name.to_lowercase())
+    }
+
+    /// Strip the first case-insensitive occurrence of `mention_name` from
+    /// `text`, preserving the original casing of the surrounding content, and
+    /// return the trimmed remainder. Used so the agent receives clean input
+    /// after the name-based mention is consumed.
+    ///
+    /// The match span is located by iterating the ORIGINAL string and
+    /// lowercasing a per-position window for comparison — `to_lowercase()` is
+    /// not length-preserving in Unicode (e.g. `İ` U+0130 → `i` + combining dot),
+    /// so a byte index computed from a lowercased copy can fall outside the
+    /// original string and panic. Internal whitespace is preserved; only the
+    /// matched name span is removed and the ends are trimmed.
+    #[cfg(feature = "whatsapp-web")]
+    fn strip_mention_name(text: &str, mention_name: &str) -> String {
+        let name_lower = mention_name.to_lowercase();
+        if name_lower.is_empty() {
+            return text.trim().to_string();
+        }
+
+        // Original-string byte offsets at every char boundary, plus the end.
+        // All slicing uses these so `before`/`after` are always rebuilt from
+        // the ORIGINAL bytes — never from a derived lowercased copy whose
+        // length may differ.
+        let mut boundaries: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+        boundaries.push(text.len());
+
+        // Try each char start position. The first match wins (matches the
+        // original `find` semantics). The final boundary is the end-of-string
+        // sentinel, so it is never a valid start.
+        for (start_idx, &start_byte) in boundaries.iter().enumerate().take(boundaries.len() - 1) {
+            if !text[start_byte..].to_lowercase().starts_with(&name_lower) {
+                continue;
+            }
+            // Walk forward one original char at a time and cut at the first
+            // char boundary whose lowercased prefix is at least as long as the
+            // name. Because the suffix lowercases to a string starting with
+            // `name_lower`, that boundary covers the full matched name.
+            for &end_byte in boundaries.iter().skip(start_idx + 1) {
+                if text[start_byte..end_byte].to_lowercase().len() >= name_lower.len() {
+                    let before = &text[..start_byte];
+                    let after = &text[end_byte..];
+                    return format!("{before}{after}").trim().to_string();
+                }
+            }
+        }
+
+        text.trim().to_string()
+    }
 }
 
 /// Decide whether a `fromMe` message outside the operator's self-chat is an
@@ -1800,6 +1861,7 @@ impl Channel for WhatsAppWebChannel {
             let wa_group_policy = self.group_policy.clone();
             let wa_self_chat_mode = self.self_chat_mode;
             let mention_only = self.mention_only;
+            let mention_name = self.mention_name.clone();
             let bot_phone_clone = self.bot_phone.clone();
             let bot_lid_clone = self.bot_lid.clone();
             let wa_dm_mention_patterns = self.dm_mention_patterns.clone();
@@ -1842,6 +1904,7 @@ impl Channel for WhatsAppWebChannel {
                     let wa_dm_mention_patterns = wa_dm_mention_patterns.clone();
                     let wa_group_mention_patterns = wa_group_mention_patterns.clone();
                     let allowed_groups_resolver = Arc::clone(&allowed_groups_resolver);
+                    let mention_name = mention_name.clone();
                     async move {
                         // whatsapp-rust 0.6: event handlers receive `Arc<Event>`
                         // per PR #613, so we match against `&*event` to get a
@@ -2021,7 +2084,9 @@ impl Channel for WhatsAppWebChannel {
                                     let text = msg.text_content().unwrap_or("");
                                     text.trim().to_string()
                                 };
-                                let content = Self::media_fallback_content(content, msg);
+                                // `mut` because the mention_name fallback below may strip the
+                                // configured name from the text before forwarding.
+                                let mut content = Self::media_fallback_content(content, msg);
 
                                 ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), &format!("WhatsApp Web message received (sender_len={}, chat_len={}, content_len={})", sender.len(), chat.len(), content.len()));
                                 ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), &format!("WhatsApp Web message content: {}", content));
@@ -2040,6 +2105,21 @@ impl Channel for WhatsAppWebChannel {
                                         let bl = bot_lid.as_deref();
                                         if !Self::is_message_addressed_to_bot(msg, &content, bp, bl) {
                                             ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), "ignoring group message not addressed to bot");
+                                            return;
+                                        }
+                                    } else if let Some(ref name) = mention_name {
+                                        // Bot phone/LID identity not yet resolved — fall back to a
+                                        // text-based mention_name match (e.g. "claw"). When the
+                                        // name is present, strip it so the agent sees clean input;
+                                        // otherwise drop the message.
+                                        if Self::contains_mention_name(&content, name) {
+                                            content = Self::strip_mention_name(&content, name);
+                                            if content.is_empty() {
+                                                ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), "message empty after stripping mention_name, skipping");
+                                                return;
+                                            }
+                                        } else {
+                                            ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), "mention_only active, no mention_name in group message, skipping");
                                             return;
                                         }
                                     } else {
@@ -3587,5 +3667,51 @@ mod tests {
         assert!(!fromme_outside_self_chat_is_operator_trigger(
             false, &dm, &group, ""
         ));
+    }
+
+    // ── contains_mention_name / strip_mention_name ─────────────
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn mention_name_matches_case_insensitively() {
+        assert!(WhatsAppWebChannel::contains_mention_name("Hey Claw, status?", "claw"));
+        assert!(WhatsAppWebChannel::contains_mention_name("hey CLAW", "Claw"));
+        assert!(!WhatsAppWebChannel::contains_mention_name("hello world", "claw"));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn strip_mention_name_removes_first_occurrence_and_trims() {
+        // The configured name is removed and surrounding casing is preserved.
+        assert_eq!(
+            WhatsAppWebChannel::strip_mention_name("Claw what is the time", "claw"),
+            "what is the time"
+        );
+        assert_eq!(
+            WhatsAppWebChannel::strip_mention_name("Hey CLAW status", "claw"),
+            "Hey  status"
+        );
+        // No match → returns trimmed original.
+        assert_eq!(
+            WhatsAppWebChannel::strip_mention_name("  hello  ", "claw"),
+            "hello"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn strip_mention_name_handles_non_ascii_without_panic() {
+        // Regression: `İ` (U+0130) lowercases to two code units, so a byte
+        // index derived from `text.to_lowercase()` would overrun the original
+        // string and panic. The leading `İ` must survive and the name span
+        // must still be removed (internal whitespace is intentionally kept).
+        assert_eq!(
+            WhatsAppWebChannel::strip_mention_name("İ claw test", "claw"),
+            "İ  test"
+        );
+        assert_eq!(
+            WhatsAppWebChannel::strip_mention_name("xİclaw", "claw"),
+            "xİ"
+        );
     }
 }
