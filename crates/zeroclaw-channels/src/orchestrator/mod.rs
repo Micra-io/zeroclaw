@@ -14261,6 +14261,29 @@ api_key = "anthropic-key"
         }
     }
 
+    /// Send hook that cancels every outgoing message, counting invocations
+    /// so tests can assert the hook actually ran.
+    struct CancellingSendHook {
+        fired: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl zeroclaw_runtime::hooks::HookHandler for CancellingSendHook {
+        fn name(&self) -> &str {
+            "cancelling-send"
+        }
+
+        async fn on_message_sending(
+            &self,
+            _channel: String,
+            _recipient: String,
+            _content: String,
+        ) -> zeroclaw_runtime::hooks::HookResult<(String, String, String)> {
+            self.fired.fetch_add(1, Ordering::SeqCst);
+            zeroclaw_runtime::hooks::HookResult::Cancel("suppressed".to_string())
+        }
+    }
+
     /// (start bracket entries, end bracket entries) — each entry is
     /// `(channel, agent_alias, turn_id)`. Aliased to keep the return type
     /// readable (clippy::type_complexity).
@@ -14543,6 +14566,71 @@ api_key = "anthropic-key"
             "brackets must share a turn_id even when cancelled"
         );
         assert!(starts[0].2.is_some(), "brackets must carry a turn_id");
+    }
+
+    /// A successful turn whose outgoing message is suppressed by an
+    /// on_message_sending Cancel hook must still close its lifecycle
+    /// bracket: AgentEnd closes before the send hook runs, so
+    /// cancellation cannot orphan the bracket.
+    #[tokio::test]
+    async fn process_channel_message_emits_agent_end_when_send_hook_cancels() {
+        // See the guard note on the success-turn bracket test.
+        let _guard = model_switch_test_guard().lock().await;
+        let channel_impl = Arc::new(RecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        let observer = Arc::new(RecordingObserver::default());
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let mut hook_runner = zeroclaw_runtime::hooks::HookRunner::new();
+        hook_runner.register(Box::new(CancellingSendHook {
+            fired: Arc::clone(&fired),
+        }));
+
+        let runtime_ctx = test_runtime_ctx_with_observer(
+            channel,
+            Arc::new(DummyModelProvider),
+            zeroclaw_config::schema::Config::default(),
+            zeroclaw_config::schema::AliasedAgentConfig::default(),
+            "test-provider",
+            Some(Arc::new(hook_runner)),
+            observer.clone(),
+        );
+
+        process_channel_message(
+            runtime_ctx,
+            message_sent_hook_test_message(),
+            CancellationToken::new(),
+        )
+        .await;
+
+        // Snapshot the channel before taking the events guard: sent_messages
+        // is an async mutex, and awaiting while holding the std-mutex events
+        // guard would hold a sync lock across an await point.
+        let sent = channel_impl.sent_messages.lock().await.clone();
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "the on_message_sending hook must run exactly once"
+        );
+        assert!(
+            sent.is_empty(),
+            "the outgoing message must be suppressed by the Cancel hook, got {sent:?}"
+        );
+
+        let events = observer.events.lock().unwrap();
+        let (starts, ends) = lifecycle_bracket_snapshot(&events);
+        assert_eq!(starts.len(), 1, "exactly one AgentStart, got {events:?}");
+        assert_eq!(
+            ends.len(),
+            1,
+            "hook-cancelled turn must still emit AgentEnd, got {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(ObserverEvent::AgentEnd { .. })),
+            "AgentEnd must be the last event: {events:?}"
+        );
+        assert!(starts[0].2.is_some(), "AgentStart must carry a turn_id");
+        assert_eq!(starts[0].2, ends[0].2, "brackets must share a turn_id");
     }
 
     #[tokio::test]
