@@ -2778,21 +2778,16 @@ pub async fn run(
         }
 
         let duration = start.elapsed();
-        let tokens_used = cost_tracking_context.as_ref().and_then(|ctx| {
-            let usage = ctx.snapshot_turn_usage();
-            (usage.input_tokens > 0 || usage.output_tokens > 0).then_some(
-                zeroclaw_api::observability_traits::TurnTokenUsage {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                },
-            )
-        });
+        let usage = cost_tracking_context
+            .as_ref()
+            .map(|ctx| ctx.observer_turn_usage())
+            .unwrap_or_default();
         observer.record_event(&ObserverEvent::AgentEnd {
             model_provider: provider_name.to_string(),
             model: model_name.to_string(),
             duration,
-            tokens_used,
-            cost_usd: None,
+            tokens_used: usage.tokens_used,
+            cost_usd: usage.cost_usd,
             channel: Some(channel_name.to_string()),
             agent_alias: Some(agent_alias.to_string()),
             turn_id: Some(turn_id),
