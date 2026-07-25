@@ -14375,10 +14375,6 @@ api_key = "anthropic-key"
     /// lifecycle brackets.
     #[tokio::test]
     async fn process_channel_message_reports_cost_usd_in_agent_end() {
-        // The exactly-one-AgentStart assertion is sensitive to a leaked
-        // process-wide model-switch request (the switch retry emits an
-        // extra re-attributing AgentStart), so serialize on the guard.
-        let _guard = model_switch_test_guard().lock().await;
         let channel_impl = Arc::new(RecordingChannel::default());
         let channel: Arc<dyn Channel> = channel_impl.clone();
         let observer = Arc::new(RecordingObserver::default());
@@ -14544,8 +14540,6 @@ api_key = "anthropic-key"
     /// cancellation cannot orphan the bracket.
     #[tokio::test]
     async fn process_channel_message_emits_agent_end_when_send_hook_cancels() {
-        // See the guard note on the success-turn bracket test.
-        let _guard = model_switch_test_guard().lock().await;
         let channel_impl = Arc::new(RecordingChannel::default());
         let channel: Arc<dyn Channel> = channel_impl.clone();
         let observer = Arc::new(RecordingObserver::default());
